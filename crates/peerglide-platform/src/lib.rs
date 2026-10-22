@@ -40,22 +40,69 @@ pub enum Captured {
 #[derive(Default)]
 struct GateState {
     deadline: AtomicU64,
-    held: AtomicU64,
+    control: AtomicU64,
 }
 #[derive(Clone, Default)]
 pub struct CaptureGate(Arc<GateState>);
+const ACTIVE: u64 = 1 << 63;
+const IN_CALLBACK: u64 = 1 << 62;
+const COUNT: u64 = !(ACTIVE | IN_CALLBACK);
 impl CaptureGate {
-    pub fn refresh(&self) {
+    /// Never enable suppression while a callback or physically held input straddles the boundary.
+    pub fn try_activate(&self) -> bool {
         self.0.deadline.store(now_ms() + 1000, Ordering::Release);
+        self.0
+            .control
+            .compare_exchange(0, ACTIVE, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+    pub fn refresh(&self) {
+        if self.active() {
+            self.0.deadline.store(now_ms() + 1000, Ordering::Release);
+        }
     }
     pub fn disable(&self) {
+        self.0.control.fetch_and(!ACTIVE, Ordering::AcqRel);
         self.0.deadline.store(0, Ordering::Release);
     }
     pub fn active(&self) -> bool {
-        self.0.deadline.load(Ordering::Acquire) > now_ms()
+        if self.0.deadline.load(Ordering::Acquire) <= now_ms() {
+            self.0.control.fetch_and(!ACTIVE, Ordering::AcqRel);
+            return false;
+        }
+        self.0.control.load(Ordering::Acquire) & ACTIVE != 0
     }
     pub fn idle(&self) -> bool {
-        self.0.held.load(Ordering::Acquire) == 0
+        self.0.control.load(Ordering::Acquire) & COUNT == 0
+    }
+    #[cfg(any(windows, target_os = "macos", test))]
+    fn begin_event(&self) -> CallbackGuard {
+        self.0.control.fetch_or(IN_CALLBACK, Ordering::AcqRel);
+        CallbackGuard(self.clone())
+    }
+    #[cfg(any(windows, target_os = "macos", test))]
+    fn set_held(&self, count: u64) {
+        let mut old = self.0.control.load(Ordering::Acquire);
+        loop {
+            let new = (old & !COUNT) | (count & COUNT);
+            match self.0.control.compare_exchange_weak(
+                old,
+                new,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => old = current,
+            }
+        }
+    }
+}
+#[cfg(any(windows, target_os = "macos", test))]
+struct CallbackGuard(CaptureGate);
+#[cfg(any(windows, target_os = "macos", test))]
+impl Drop for CallbackGuard {
+    fn drop(&mut self) {
+        self.0 .0.control.fetch_and(!IN_CALLBACK, Ordering::AcqRel);
     }
 }
 impl Drop for CaptureSession {
@@ -121,10 +168,8 @@ impl HookState {
         self.emit(Captured::Input(Input::Button { button, down }));
     }
     fn update_held(&self) {
-        self.gate.0.held.store(
-            (self.keys.len() + self.buttons.len()) as u64,
-            Ordering::Release,
-        );
+        self.gate
+            .set_held((self.keys.len() + self.buttons.len()) as u64);
     }
     fn emit(&self, e: Captured) {
         if self.tx.try_send(e).is_err() {
@@ -142,17 +187,111 @@ impl HookState {
         let alt = self.keys.contains(&0xe2) || self.keys.contains(&0xe6);
         if ctrl && alt && down && usage == 0x29 {
             self.gate.disable();
+            self.toggle_armed = false;
             self.emit(Captured::Emergency);
             return false;
         }
         if ctrl && alt && down && usage == 0x4f {
             self.toggle_armed = true;
         }
-        self.emit(Captured::Input(Input::Key { usage, down }));
+        let swallow_toggle = self.toggle_armed && usage == 0x4f;
+        if !swallow_toggle {
+            self.emit(Captured::Input(Input::Key { usage, down }));
+        }
         if self.toggle_armed && self.keys.is_empty() {
             self.toggle_armed = false;
             self.emit(Captured::Toggle);
         }
-        self.gate.active()
+        swallow_toggle || self.gate.active()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn watchdog_is_fail_open_and_explicitly_releasable() {
+        let gate = CaptureGate::default();
+        assert!(!gate.active());
+        assert!(gate.try_activate());
+        assert!(gate.active());
+        gate.disable();
+        assert!(!gate.active());
+        gate.0.deadline.store(now_ms(), Ordering::Release);
+        assert!(!gate.active());
+        gate.set_held(1);
+        assert!(!gate.idle());
+    }
+}
+
+#[cfg(all(test, any(windows, target_os = "macos")))]
+mod hook_tests {
+    use super::*;
+    fn state(capacity: usize) -> (HookState, mpsc::Receiver<Captured>) {
+        let (tx, rx) = mpsc::channel(capacity);
+        (
+            HookState {
+                tx,
+                gate: CaptureGate::default(),
+                keys: Default::default(),
+                buttons: Default::default(),
+                toggle_armed: false,
+            },
+            rx,
+        )
+    }
+    #[test]
+    fn hotkey_waits_for_release_and_never_forwards_arrow() {
+        let (mut s, mut rx) = state(20);
+        s.key(0xe0, true);
+        s.key(0xe2, true);
+        assert!(s.key(0x4f, true));
+        assert!(!s.gate.idle());
+        assert!(s.key(0x4f, false));
+        s.key(0xe0, false);
+        s.key(0xe2, false);
+        assert!(s.gate.idle());
+        let mut toggles = 0;
+        while let Ok(e) = rx.try_recv() {
+            match e {
+                Captured::Toggle => toggles += 1,
+                Captured::Input(Input::Key { usage: 0x4f, .. }) => panic!("switch arrow leaked"),
+                _ => (),
+            }
+        }
+        assert_eq!(toggles, 1);
+    }
+    #[test]
+    fn queue_overflow_disables_capture() {
+        let (s, _rx) = state(1);
+        assert!(s.gate.try_activate());
+        s.emit(Captured::Emergency);
+        s.emit(Captured::Emergency);
+        assert!(!s.gate.active());
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+    #[test]
+    fn activation_cannot_split_a_local_callback_or_held_key() {
+        let gate = CaptureGate::default();
+        {
+            let _callback = gate.begin_event();
+            assert!(!gate.try_activate());
+            gate.set_held(1);
+        }
+        assert!(!gate.try_activate());
+        {
+            let _callback = gate.begin_event();
+            gate.set_held(0);
+            assert!(!gate.try_activate());
+        }
+        assert!(gate.try_activate());
+        gate.0.deadline.store(now_ms(), Ordering::Release);
+        assert!(!gate.active());
+        gate.refresh();
+        assert!(!gate.active());
     }
 }

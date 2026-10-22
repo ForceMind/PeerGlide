@@ -17,7 +17,9 @@ See [validation](docs/VALIDATION.md).
 Primary-display switching, basic HID keys, three mouse buttons and scrolling
 form the initial native prototype. Multi-monitor topology, IME composition,
 clipboard, files, mDNS, pairing codes, tray, reconnect and signed installers are
-not implemented in this milestone.
+not implemented in this milestone. A native eframe control panel provides
+identity/enrollment, session start/stop, probes, relative screen placement and
+dark/light settings.
 
 ## Build
 
@@ -27,7 +29,18 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-Use stable Rust. CI artifacts are unsigned prototype binaries, not installers.
+Use stable Rust. Run `cargo build --workspace --release --locked` to build both
+executables. Launch `peerglide-gui` with `peerglide` beside it. Devices creates
+an identity and enrolls the other computer's public certificate after fingerprint
+confirmation. Settings explicitly enables native input and receiving control;
+Home starts/listens/connects and can run a harmless transport probe. Displays
+sets the switching side. No config file editing is required.
+
+CI artifacts contain an unsigned Windows portable ZIP, macOS app bundle or
+Linux portable ZIP plus checksums and notices. They are experimental builds,
+not stable installers. macOS signing/notarization and Windows code signing are
+pending; do not disable OS protections to open them. The Linux GUI can configure
+and probe connections, but Linux native input is not implemented.
 
 ## Explicit two-peer enrollment
 

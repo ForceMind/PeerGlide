@@ -37,3 +37,17 @@ physical keys/buttons are released, avoiding local-down/remote-up splitting.
 
 OS permissions, Secure Input, UAC and privilege boundaries are respected. Failure
 terminates control rather than bypassing system security.
+
+## Desktop control panel
+
+`peerglide-gui` is an eframe process supervising the same `peerglide` CLI worker.
+It copies only a public peer certificate into its data directory and persists its
+confirmed fingerprint. Changed certificate bytes require explicit reenrollment.
+It records explicit input grants, side/appearance and address settings. Starting,
+probing and disconnecting invoke real workers; a private local stdin stop command
+cancels the session and runs recovery destructors. The GUI has a bounded visible
+log history and never receives key payloads. Transfers is explicitly unavailable.
+
+This process boundary isolates native hooks from GUI stalls. A graceful stop is
+attempted before a bounded forced-stop fallback. OS key-store/ACL provisioning,
+interactive pairing codes, tray and mDNS remain subsequent work.

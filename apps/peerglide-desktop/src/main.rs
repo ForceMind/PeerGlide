@@ -51,6 +51,9 @@ impl From<Side> for Edge {
 }
 #[derive(clap::Args)]
 struct Options {
+    /// Accept a stop command on stdin from the local GUI supervisor.
+    #[arg(long, hide = true)]
+    managed: bool,
     #[arg(long, default_value = "identity")]
     identity: PathBuf,
     /// Explicitly enrolled remote public certificate; verify its BLAKE3 fingerprint out of band.
@@ -88,6 +91,25 @@ async fn main() -> Result<()> {
     }
 }
 async fn run(o: Options, address: Option<SocketAddr>, probe: bool) -> Result<()> {
+    if o.managed {
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::stdin().lock().lines() {
+                match line {
+                    Ok(s) if s.trim() == "stop" => break,
+                    Ok(_) => (),
+                    Err(_) => break,
+                }
+            }
+            let _ = stop.send(());
+        });
+        tokio::select! {result=run_inner(o,address,probe)=>result,_=stopped=>Ok(())}
+    } else {
+        run_inner(o, address, probe).await
+    }
+}
+async fn run_inner(o: Options, address: Option<SocketAddr>, probe: bool) -> Result<()> {
     let id = transport::Identity::load(&o.identity)?;
     let peer = std::fs::read(&o.peer_cert)?;
     anyhow::ensure!(

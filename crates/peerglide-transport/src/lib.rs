@@ -67,6 +67,10 @@ fn roots(peer: &[u8]) -> Result<rustls::RootCertStore> {
     roots.add(CertificateDer::from(peer.to_vec()))?;
     Ok(roots)
 }
+pub fn validate_certificate(certificate: &[u8]) -> Result<()> {
+    roots(certificate)?;
+    Ok(())
+}
 fn transport() -> Arc<quinn::TransportConfig> {
     let mut t = quinn::TransportConfig::default();
     t.max_concurrent_bidi_streams(1u8.into())
@@ -207,6 +211,68 @@ mod tests {
         })
         .await?;
         assert!(rejected);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod negative_tests {
+    use super::*;
+    #[tokio::test]
+    async fn rejects_wrong_server_certificate() -> Result<()> {
+        let a = Identity::generate()?;
+        let b = Identity::generate()?;
+        let other = Identity::generate()?;
+        let ea = endpoint("127.0.0.1:0".parse()?, &a, &other.certificate)?;
+        let eb = endpoint("127.0.0.1:0".parse()?, &b, &a.certificate)?;
+        let server = async {
+            let _ = eb.accept().await.unwrap().await;
+        };
+        let client = async {
+            assert!(ea
+                .connect(eb.local_addr().unwrap(), "peerglide.local")
+                .unwrap()
+                .await
+                .is_err());
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(server, client)
+        })
+        .await?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn oversized_stream_frame_rejected_without_reading_body() -> Result<()> {
+        let a = Identity::generate()?;
+        let b = Identity::generate()?;
+        let ea = endpoint("127.0.0.1:0".parse()?, &a, &b.certificate)?;
+        let eb = endpoint("127.0.0.1:0".parse()?, &b, &a.certificate)?;
+        let server = async {
+            let c = eb.accept().await.unwrap().await?;
+            let (mut tx, mut rx) = c.accept_bi().await?;
+            let error = receive(&mut rx)
+                .await
+                .err()
+                .context("oversized frame accepted")?;
+            assert!(error.to_string().contains("too large"));
+            send(&mut tx, &Message::Denied { lease: 0 }).await?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok::<_, anyhow::Error>(())
+        };
+        let client = async {
+            let c = ea.connect(eb.local_addr()?, "peerglide.local")?.await?;
+            let (mut tx, mut rx) = c.open_bi().await?;
+            tx.write_u32(u32::MAX).await?;
+            assert!(matches!(
+                receive(&mut rx).await?,
+                Message::Denied { lease: 0 }
+            ));
+            Ok::<_, anyhow::Error>(())
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::try_join!(server, client)
+        })
+        .await??;
         Ok(())
     }
 }

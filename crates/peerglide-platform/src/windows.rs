@@ -12,13 +12,15 @@ pub fn capture(tx: mpsc::Sender<Captured>, gate: CaptureGate) -> Result<()> {
     let (ready, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || unsafe {
         SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        STATE.set(Some(HookState {
+        let state = HookState {
             tx,
             gate,
-            keys: Default::default(),
-            buttons: Default::default(),
+            keys: initial_keys(),
+            buttons: initial_buttons(),
             toggle_armed: false,
-        }));
+        };
+        state.update_held();
+        STATE.set(Some(state));
         let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), null_mut(), 0);
         let keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), null_mut(), 0);
         if mouse.is_null() || keyboard.is_null() {
@@ -58,6 +60,7 @@ unsafe extern "system" fn key_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
             if let Some(usage) = from_vk(e.vkCode as u16) {
                 let block = STATE.with_borrow_mut(|s| {
                     s.as_mut().is_some_and(|s| {
+                        let _callback = s.gate.begin_event();
                         s.key(usage, w as u32 == WM_KEYDOWN || w as u32 == WM_SYSKEYDOWN)
                     })
                 });
@@ -77,6 +80,7 @@ unsafe extern "system" fn mouse_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
                 let Some(s) = s else {
                     return false;
                 };
+                let _callback = s.gate.begin_event();
                 let active = s.gate.active();
                 match w as u32 {
                     WM_MOUSEMOVE => {
@@ -256,4 +260,30 @@ fn to_vk(u: u16) -> Option<u16> {
 }
 fn from_vk(v: u16) -> Option<u16> {
     (4..=0xe7).find(|u| to_vk(*u) == Some(v))
+}
+
+unsafe fn initial_keys() -> std::collections::BTreeSet<u16> {
+    (4..=0xe7)
+        .filter(|&u| to_vk(u).is_some_and(|v| GetAsyncKeyState(v as i32) < 0))
+        .collect()
+}
+unsafe fn initial_buttons() -> std::collections::BTreeSet<u8> {
+    [(1, 1), (2, 2), (3, 4)]
+        .into_iter()
+        .filter(|(_, v)| GetAsyncKeyState(*v) < 0)
+        .map(|(b, _)| b)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn key_positions_roundtrip() {
+        for u in 4..=0xe7 {
+            if let Some(v) = to_vk(u) {
+                assert_eq!(from_vk(v), Some(u));
+            }
+        }
+    }
 }

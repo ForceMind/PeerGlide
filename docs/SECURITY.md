@@ -7,7 +7,7 @@ cloud relay or 0-RTT input. Fingerprints use BLAKE3; TLS uses rustls/ring.
 
 `--allow-control` grants input for the session independently of certificate
 trust. Clipboard/files are not implemented. Stop the session and remove/replace
-the peer certificate to revoke CLI authorization. Persistent grant UI is pending.
+the peer certificate to revoke CLI authorization. The GUI persists an explicitly confirmed fingerprint and input grant; revocation requires stopping the active session, then revoking the peer in Devices. Pairing codes and OS key-store protection are pending.
 
 Frames are capped before allocation at 4096 bytes, input codes and motion ranges
 validated, stream count/windows bounded. Input payloads do not implement Debug

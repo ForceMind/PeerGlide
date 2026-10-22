@@ -20,11 +20,18 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
-      - run: cargo build --release --locked
+      - run: cargo build --release --workspace --locked
+      - run: python tools/smoke.py
+      - run: python tools/third_party.py
+      - name: GUI runtime smoke on isolated Linux display
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xdotool imagemagick
+          xvfb-run -a python tools/gui_smoke.py
+      - run: python tools/package.py
       - uses: actions/upload-artifact@v4
         with:
           name: peerglide-prototype-${{ matrix.os }}
-          path: |
-            target/release/peerglide
-            target/release/peerglide.exe
+          path: dist/*
           if-no-files-found: error

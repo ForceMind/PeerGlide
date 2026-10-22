@@ -42,6 +42,7 @@ extern "C" {
     fn CGEventSetIntegerValueField(event: Ref, field: u32, value: i64);
     fn CGEventSetFlags(event: Ref, flags: u64);
     fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
+    fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
     fn CGEventCreateKeyboardEvent(source: Ref, key: u16, down: bool) -> Ref;
     fn CGEventCreateMouseEvent(source: Ref, kind: u32, point: Point, button: u32) -> Ref;
     fn CGEventCreateScrollWheelEvent(source: Ref, unit: u32, count: u32, ...) -> Ref;
@@ -59,17 +60,20 @@ extern "C" {
 }
 thread_local! {static STATE:RefCell<Option<HookState>>=const {RefCell::new(None)};}
 static MODIFIERS: Mutex<u64> = Mutex::new(0);
+static BUTTONS: AtomicU64 = AtomicU64::new(0);
 pub fn capture(tx: mpsc::Sender<Captured>, gate: CaptureGate) -> Result<()> {
     ensure!(unsafe {AXIsProcessTrusted()},"grant Accessibility and Input Monitoring permissions in System Settings, then restart PeerGlide");
     let (ready, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || unsafe {
-        STATE.set(Some(HookState {
+        let state = HookState {
             tx,
             gate,
-            keys: Default::default(),
-            buttons: Default::default(),
+            keys: initial_keys(),
+            buttons: initial_buttons(),
             toggle_armed: false,
-        }));
+        };
+        state.update_held();
+        STATE.set(Some(state));
         let mask = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 22, 25, 26, 27]
             .iter()
             .fold(0, |a, n| a | 1u64 << n);
@@ -119,6 +123,7 @@ unsafe extern "C" fn callback(_: Ref, kind: u32, event: Ref, _: Ref) -> Ref {
         let Some(s) = s else {
             return false;
         };
+        let _callback = s.gate.begin_event();
         let active = s.gate.active();
         match kind {
             10..=12 => {
@@ -186,14 +191,24 @@ unsafe fn post(event: Ref) -> Result<()> {
 pub fn pointer(x: f64, y: f64) -> Result<()> {
     unsafe {
         let b = CGDisplayBounds(CGMainDisplayID());
+        let buttons = BUTTONS.load(Ordering::Acquire);
+        let (kind, button) = if buttons & 1 != 0 {
+            (6, 0)
+        } else if buttons & 2 != 0 {
+            (7, 1)
+        } else if buttons & 4 != 0 {
+            (27, 2)
+        } else {
+            (5, 0)
+        };
         post(CGEventCreateMouseEvent(
             null_mut(),
-            5,
+            kind,
             Point {
                 x: b.origin.x + x * (b.size.width - 1.0),
                 y: b.origin.y + y * (b.size.height - 1.0),
             },
-            0,
+            button,
         ))
     }
 }
@@ -204,22 +219,18 @@ pub fn inject(event: Input) -> Result<()> {
                 let code = to_code(usage).ok_or_else(|| anyhow::anyhow!("unsupported HID key"))?;
                 let e = CGEventCreateKeyboardEvent(null_mut(), code, down);
                 ensure!(!e.is_null(), "keyboard event unavailable");
-                let mask = match usage {
-                    0xe0 | 0xe4 => 1 << 18,
-                    0xe1 | 0xe5 => 1 << 17,
-                    0xe2 | 0xe6 => 1 << 19,
-                    0xe3 | 0xe7 => 1 << 20,
-                    _ => 0,
-                };
                 let mut modifiers = MODIFIERS
                     .lock()
                     .map_err(|_| anyhow::anyhow!("modifier lock poisoned"))?;
-                if down {
-                    *modifiers |= mask;
-                } else {
-                    *modifiers &= !mask;
+                if (0xe0..=0xe7).contains(&usage) {
+                    let bit = 1u64 << (usage - 0xe0);
+                    if down {
+                        *modifiers |= bit;
+                    } else {
+                        *modifiers &= !bit;
+                    }
                 }
-                CGEventSetFlags(e, *modifiers);
+                CGEventSetFlags(e, modifier_flags(*modifiers));
                 post(e)
             }
             Input::Button { button, down } => {
@@ -236,6 +247,12 @@ pub fn inject(event: Input) -> Result<()> {
                     (3, false) => (26, 2),
                     _ => anyhow::bail!("unsupported button"),
                 };
+                let bit = 1u64 << (button - 1);
+                if down {
+                    BUTTONS.fetch_or(bit, Ordering::Release);
+                } else {
+                    BUTTONS.fetch_and(!bit, Ordering::Release);
+                }
                 post(CGEventCreateMouseEvent(null_mut(), kind, point, b))
             }
             Input::Scroll { x, y } => post(CGEventCreateScrollWheelEvent(
@@ -339,4 +356,50 @@ fn to_code(u: u16) -> Option<u16> {
 }
 fn from_code(c: u16) -> Option<u16> {
     KEYS.iter().find(|p| p.1 == c).map(|p| p.0)
+}
+
+fn modifier_flags(bits: u64) -> u64 {
+    let mut flags = 0;
+    for (mask, flag) in [
+        (0x11, 1 << 18),
+        (0x22, 1 << 17),
+        (0x44, 1 << 19),
+        (0x88, 1 << 20),
+    ] {
+        if bits & mask != 0 {
+            flags |= flag;
+        }
+    }
+    flags
+}
+unsafe fn initial_keys() -> std::collections::BTreeSet<u16> {
+    KEYS.iter()
+        .filter(|(_, c)| CGEventSourceKeyState(0, *c))
+        .map(|(u, _)| *u)
+        .collect()
+}
+unsafe fn initial_buttons() -> std::collections::BTreeSet<u8> {
+    [(1, 0), (2, 1), (3, 2)]
+        .into_iter()
+        .filter(|(_, b)| CGEventSourceButtonState(0, *b))
+        .map(|(u, _)| u)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn key_positions_roundtrip() {
+        for &(u, c) in KEYS {
+            assert_eq!(to_code(u), Some(c));
+            assert_eq!(from_code(c), Some(u));
+        }
+    }
+    #[test]
+    fn both_modifier_sides_preserve_shared_flag() {
+        assert_eq!(modifier_flags(0x11), 1 << 18);
+        assert_eq!(modifier_flags(0x10), 1 << 18);
+        assert_eq!(modifier_flags(0), 0);
+    }
 }

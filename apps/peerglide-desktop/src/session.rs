@@ -40,6 +40,9 @@ async fn send(tx: &mut quinn::SendStream, m: &Message) -> Result<()> {
     tokio::time::timeout(Duration::from_millis(250), transport::send(tx, m)).await??;
     Ok(())
 }
+fn normal_close(c: &quinn::Connection) -> bool {
+    matches!(c.close_reason(),Some(quinn::ConnectionError::ApplicationClosed(closed)) if closed.error_code==0u8.into())
+}
 pub async fn run(
     c: quinn::Connection,
     mut tx: quinn::SendStream,
@@ -104,10 +107,12 @@ pub async fn run(
                 if let (Some(cap),Some(lease))=(&capture,outgoing){if !cap.gate.active(){outgoing=None;send(&mut tx,&Message::Release{lease}).await?;}}
             },
             m=messages.recv()=>{
-                let Some(m)=m else{return Ok(());};let m=m?;let now=now_ms();
+                let Some(m)=m else{return Ok(());};
+                let m=match m {Ok(m)=>m,Err(_) if normal_close(&c)=>return Ok(()),Err(e)=>return Err(e)};
+                let now=now_ms();
                 match m {
                     Message::Acquire{lease,edge:remote_edge,along}=>{
-                        let granted=along.is_finite() && (0.0..=1.0).contains(&along) && pending.is_none() && outgoing.is_none() && recovery.receiver.acquire(lease,now,allow);
+                        let granted=along.is_finite() && (0.0..=1.0).contains(&along) && pending.is_none() && outgoing.is_none() && capture.as_ref().is_none_or(|cap|cap.gate.idle()) && recovery.receiver.acquire(lease,now,allow);
                         if granted {
                             entry=remote_edge.opposite();position=entry_position(entry,along);incoming_moved=false;
                             recovery.pointer(position.0,position.1)?;
@@ -115,7 +120,7 @@ pub async fn run(
                         }else{send(&mut tx,&Message::Denied{lease}).await?;}
                     },
                     Message::Granted{lease}=>{
-                        if pending.is_some_and(|(id,_)|id==lease) && capture.as_ref().is_some_and(|cap|cap.gate.idle()){pending=None;outgoing=Some(lease);sequence=0;last_pong=now;if let Some(cap)=&capture{cap.gate.refresh();}}
+                        if pending.is_some_and(|(id,_)|id==lease) && capture.as_ref().is_some_and(|cap|cap.gate.try_activate()){pending=None;outgoing=Some(lease);sequence=0;last_pong=now;if let Some(cap)=&capture{cap.gate.refresh();}}
                         else{send(&mut tx,&Message::Release{lease}).await?;}
                     },
                     Message::Denied{lease}=>{if pending.is_some_and(|(id,_)|id==lease){pending=None;}},
@@ -130,7 +135,7 @@ pub async fn run(
                 }
             },
             d=c.read_datagram()=>{
-                let d=d?;
+                let d=match d {Ok(d)=>d,Err(_) if normal_close(&c)=>return Ok(()),Err(e)=>return Err(e.into())};
                 if let Ok(m)=decode::<Motion>(&d) {if recovery.receiver.motion(m,now_ms()) {
                     recovery.pointer(m.x,m.y)?;
                     let dist=distance(entry,m.x,m.y);
@@ -191,5 +196,120 @@ fn entry_position(edge: Edge, along: f64) -> (f64, f64) {
         Edge::Right => (0.998, along),
         Edge::Top => (along, 0.002),
         Edge::Bottom => (along, 0.998),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use transport::Identity;
+
+    async fn exercise(allow: bool) -> Result<()> {
+        let a = Identity::generate()?;
+        let b = Identity::generate()?;
+        let ea = transport::endpoint("127.0.0.1:0".parse()?, &a, &b.certificate)?;
+        let eb = transport::endpoint("127.0.0.1:0".parse()?, &b, &a.certificate)?;
+        let server = async {
+            let c = eb.accept().await.unwrap().await?;
+            let (tx, rx) = c.accept_bi().await?;
+            run(c, tx, rx, allow, false, Edge::Right).await
+        };
+        let client = async {
+            let c = ea.connect(eb.local_addr()?, "peerglide.local")?.await?;
+            let (mut tx, mut rx) = c.open_bi().await?;
+            send(&mut tx, &Message::Ping { lease: 0 }).await?;
+            assert!(matches!(
+                transport::receive(&mut rx).await?,
+                Message::Pong { lease: 0 }
+            ));
+            send(
+                &mut tx,
+                &Message::Acquire {
+                    lease: 1,
+                    edge: Edge::Right,
+                    along: 0.5,
+                },
+            )
+            .await?;
+            let response = transport::receive(&mut rx).await?;
+            if allow {
+                assert!(matches!(response, Message::Granted { lease: 1 }));
+                send(
+                    &mut tx,
+                    &Message::Input {
+                        lease: 1,
+                        event: Input::Key {
+                            usage: 0xe0,
+                            down: true,
+                        },
+                    },
+                )
+                .await?;
+                send(&mut tx, &Message::Ping { lease: 1 }).await?;
+                assert!(matches!(
+                    transport::receive(&mut rx).await?,
+                    Message::Pong { lease: 1 }
+                ));
+                send(
+                    &mut tx,
+                    &Message::Acquire {
+                        lease: 2,
+                        edge: Edge::Right,
+                        along: 0.5,
+                    },
+                )
+                .await?;
+                assert!(matches!(
+                    transport::receive(&mut rx).await?,
+                    Message::Denied { lease: 2 }
+                ));
+                tokio::time::sleep(Duration::from_millis(1800)).await;
+                send(
+                    &mut tx,
+                    &Message::Acquire {
+                        lease: 3,
+                        edge: Edge::Right,
+                        along: 0.5,
+                    },
+                )
+                .await?;
+                assert!(matches!(
+                    transport::receive(&mut rx).await?,
+                    Message::Granted { lease: 3 }
+                ));
+                send(&mut tx, &Message::Release { lease: 3 }).await?;
+                send(
+                    &mut tx,
+                    &Message::Acquire {
+                        lease: 1,
+                        edge: Edge::Left,
+                        along: 0.5,
+                    },
+                )
+                .await?;
+                assert!(matches!(
+                    transport::receive(&mut rx).await?,
+                    Message::Denied { lease: 1 }
+                ));
+            } else {
+                assert!(matches!(response, Message::Denied { lease: 1 }));
+            }
+            c.close(0u8.into(), b"done");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok::<_, anyhow::Error>(())
+        };
+        tokio::time::timeout(Duration::from_secs(8), async {
+            tokio::try_join!(server, client)
+        })
+        .await??;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn default_denies_input() -> Result<()> {
+        exercise(false).await
+    }
+    #[tokio::test]
+    async fn live_session_grants_conflicts_expires_and_rejects_replay() -> Result<()> {
+        exercise(true).await
     }
 }
