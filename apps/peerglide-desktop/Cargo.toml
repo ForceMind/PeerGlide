@@ -1,0 +1,17 @@
+[package]
+name = "peerglide-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[[bin]]
+name = "peerglide"
+path = "src/main.rs"
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+quinn.workspace = true
+peerglide-core.workspace = true
+peerglide-protocol.workspace = true
+peerglide-transport.workspace = true
+peerglide-platform.workspace = true

@@ -1,0 +1,342 @@
+//! CoreGraphics event tap and tagged event injection. No permission bypasses.
+use super::*;
+use anyhow::ensure;
+use std::{cell::RefCell, ffi::c_void, ptr::null_mut, sync::Mutex};
+type Ref = *mut c_void;
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Point {
+    x: f64,
+    y: f64,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Size {
+    width: f64,
+    height: f64,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Rect {
+    origin: Point,
+    size: Size,
+}
+const TAG: i64 = 0x50474c44;
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+    fn CGMainDisplayID() -> u32;
+    fn CGDisplayBounds(display: u32) -> Rect;
+    fn CGEventTapCreate(
+        location: u32,
+        place: u32,
+        options: u32,
+        mask: u64,
+        callback: unsafe extern "C" fn(Ref, u32, Ref, Ref) -> Ref,
+        user: Ref,
+    ) -> Ref;
+    fn CGEventTapEnable(tap: Ref, enable: bool);
+    fn CGEventGetLocation(event: Ref) -> Point;
+    fn CGEventGetIntegerValueField(event: Ref, field: u32) -> i64;
+    fn CGEventGetDoubleValueField(event: Ref, field: u32) -> f64;
+    fn CGEventSetIntegerValueField(event: Ref, field: u32, value: i64);
+    fn CGEventSetFlags(event: Ref, flags: u64);
+    fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
+    fn CGEventCreateKeyboardEvent(source: Ref, key: u16, down: bool) -> Ref;
+    fn CGEventCreateMouseEvent(source: Ref, kind: u32, point: Point, button: u32) -> Ref;
+    fn CGEventCreateScrollWheelEvent(source: Ref, unit: u32, count: u32, ...) -> Ref;
+    fn CGEventCreate(source: Ref) -> Ref;
+    fn CGEventPost(tap: u32, event: Ref);
+}
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    static kCFRunLoopCommonModes: Ref;
+    fn CFMachPortCreateRunLoopSource(allocator: Ref, port: Ref, order: isize) -> Ref;
+    fn CFRunLoopGetCurrent() -> Ref;
+    fn CFRunLoopAddSource(loop_: Ref, source: Ref, mode: Ref);
+    fn CFRunLoopRun();
+    fn CFRelease(value: Ref);
+}
+thread_local! {static STATE:RefCell<Option<HookState>>=const {RefCell::new(None)};}
+static MODIFIERS: Mutex<u64> = Mutex::new(0);
+pub fn capture(tx: mpsc::Sender<Captured>, gate: CaptureGate) -> Result<()> {
+    ensure!(unsafe {AXIsProcessTrusted()},"grant Accessibility and Input Monitoring permissions in System Settings, then restart PeerGlide");
+    let (ready, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || unsafe {
+        STATE.set(Some(HookState {
+            tx,
+            gate,
+            keys: Default::default(),
+            buttons: Default::default(),
+            toggle_armed: false,
+        }));
+        let mask = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 22, 25, 26, 27]
+            .iter()
+            .fold(0, |a, n| a | 1u64 << n);
+        let tap = CGEventTapCreate(0, 0, 0, mask, callback, null_mut());
+        if tap.is_null() {
+            let _ = ready.send(false);
+            return;
+        }
+        let source = CFMachPortCreateRunLoopSource(null_mut(), tap, 0);
+        if source.is_null() {
+            CFRelease(tap);
+            let _ = ready.send(false);
+            return;
+        }
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
+        CGEventTapEnable(tap, true);
+        let _ = ready.send(true);
+        CFRunLoopRun();
+        STATE.with_borrow(|s| {
+            if let Some(s) = s {
+                s.gate.disable();
+            }
+        });
+        CFRelease(source);
+        CFRelease(tap);
+    });
+    ensure!(
+        rx.recv_timeout(std::time::Duration::from_secs(3))?,
+        "CoreGraphics event tap unavailable; check Input Monitoring permission"
+    );
+    Ok(())
+}
+unsafe extern "C" fn callback(_: Ref, kind: u32, event: Ref, _: Ref) -> Ref {
+    if kind >= 0xffff_fffe {
+        STATE.with_borrow(|s| {
+            if let Some(s) = s {
+                s.gate.disable();
+                s.emit(Captured::Emergency);
+            }
+        });
+        return event;
+    }
+    if CGEventGetIntegerValueField(event, 42) == TAG {
+        return event;
+    }
+    let block = STATE.with_borrow_mut(|s| {
+        let Some(s) = s else {
+            return false;
+        };
+        let active = s.gate.active();
+        match kind {
+            10..=12 => {
+                let code = CGEventGetIntegerValueField(event, 9) as u16;
+                if let Some(usage) = from_code(code) {
+                    return s.key(
+                        usage,
+                        if kind == 12 {
+                            CGEventSourceKeyState(0, code)
+                        } else {
+                            kind == 10
+                        },
+                    );
+                }
+            }
+            5..=7 | 27 => {
+                if active {
+                    s.emit(Captured::Motion {
+                        dx: CGEventGetDoubleValueField(event, 4),
+                        dy: CGEventGetDoubleValueField(event, 5),
+                    });
+                } else {
+                    let p = CGEventGetLocation(event);
+                    let b = CGDisplayBounds(CGMainDisplayID());
+                    s.emit(Captured::Position {
+                        x: p.x - b.origin.x,
+                        y: p.y - b.origin.y,
+                        width: b.size.width,
+                        height: b.size.height,
+                    });
+                }
+            }
+            1..=4 | 25 | 26 => {
+                let (button, down) = match kind {
+                    1 => (1, true),
+                    2 => (1, false),
+                    3 => (2, true),
+                    4 => (2, false),
+                    25 => (3, true),
+                    _ => (3, false),
+                };
+                s.button(button, down);
+            }
+            22 => s.emit(Captured::Input(Input::Scroll {
+                x: CGEventGetIntegerValueField(event, 12).clamp(-1200, 1200) as i16,
+                y: CGEventGetIntegerValueField(event, 11).clamp(-1200, 1200) as i16,
+            })),
+            _ => (),
+        }
+        active && s.gate.active()
+    });
+    if block {
+        null_mut()
+    } else {
+        event
+    }
+}
+unsafe fn post(event: Ref) -> Result<()> {
+    ensure!(!event.is_null(), "CoreGraphics rejected event creation");
+    CGEventSetIntegerValueField(event, 42, TAG);
+    CGEventPost(0, event);
+    CFRelease(event);
+    Ok(())
+}
+pub fn pointer(x: f64, y: f64) -> Result<()> {
+    unsafe {
+        let b = CGDisplayBounds(CGMainDisplayID());
+        post(CGEventCreateMouseEvent(
+            null_mut(),
+            5,
+            Point {
+                x: b.origin.x + x * (b.size.width - 1.0),
+                y: b.origin.y + y * (b.size.height - 1.0),
+            },
+            0,
+        ))
+    }
+}
+pub fn inject(event: Input) -> Result<()> {
+    unsafe {
+        match event {
+            Input::Key { usage, down } => {
+                let code = to_code(usage).ok_or_else(|| anyhow::anyhow!("unsupported HID key"))?;
+                let e = CGEventCreateKeyboardEvent(null_mut(), code, down);
+                ensure!(!e.is_null(), "keyboard event unavailable");
+                let mask = match usage {
+                    0xe0 | 0xe4 => 1 << 18,
+                    0xe1 | 0xe5 => 1 << 17,
+                    0xe2 | 0xe6 => 1 << 19,
+                    0xe3 | 0xe7 => 1 << 20,
+                    _ => 0,
+                };
+                let mut modifiers = MODIFIERS
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("modifier lock poisoned"))?;
+                if down {
+                    *modifiers |= mask;
+                } else {
+                    *modifiers &= !mask;
+                }
+                CGEventSetFlags(e, *modifiers);
+                post(e)
+            }
+            Input::Button { button, down } => {
+                let pos = CGEventCreate(null_mut());
+                ensure!(!pos.is_null(), "pointer state unavailable");
+                let point = CGEventGetLocation(pos);
+                CFRelease(pos);
+                let (kind, b) = match (button, down) {
+                    (1, true) => (1, 0),
+                    (1, false) => (2, 0),
+                    (2, true) => (3, 1),
+                    (2, false) => (4, 1),
+                    (3, true) => (25, 2),
+                    (3, false) => (26, 2),
+                    _ => anyhow::bail!("unsupported button"),
+                };
+                post(CGEventCreateMouseEvent(null_mut(), kind, point, b))
+            }
+            Input::Scroll { x, y } => post(CGEventCreateScrollWheelEvent(
+                null_mut(),
+                1,
+                2,
+                y as i32,
+                x as i32,
+            )),
+        }
+    }
+}
+// USB HID usages to documented macOS virtual key positions; intentionally finite MVP coverage.
+const KEYS: &[(u16, u16)] = &[
+    (4, 0),
+    (5, 11),
+    (6, 8),
+    (7, 2),
+    (8, 14),
+    (9, 3),
+    (10, 5),
+    (11, 4),
+    (12, 34),
+    (13, 38),
+    (14, 40),
+    (15, 37),
+    (16, 46),
+    (17, 45),
+    (18, 31),
+    (19, 35),
+    (20, 12),
+    (21, 15),
+    (22, 1),
+    (23, 17),
+    (24, 32),
+    (25, 9),
+    (26, 13),
+    (27, 7),
+    (28, 16),
+    (29, 6),
+    (30, 18),
+    (31, 19),
+    (32, 20),
+    (33, 21),
+    (34, 23),
+    (35, 22),
+    (36, 26),
+    (37, 28),
+    (38, 25),
+    (39, 29),
+    (40, 36),
+    (41, 53),
+    (42, 51),
+    (43, 48),
+    (44, 49),
+    (45, 27),
+    (46, 24),
+    (47, 33),
+    (48, 30),
+    (49, 42),
+    (51, 41),
+    (52, 39),
+    (53, 50),
+    (54, 43),
+    (55, 47),
+    (56, 44),
+    (57, 57),
+    (58, 122),
+    (59, 120),
+    (60, 99),
+    (61, 118),
+    (62, 96),
+    (63, 97),
+    (64, 98),
+    (65, 100),
+    (66, 101),
+    (67, 109),
+    (68, 103),
+    (69, 111),
+    (73, 114),
+    (74, 115),
+    (75, 116),
+    (76, 117),
+    (77, 119),
+    (78, 121),
+    (79, 124),
+    (80, 123),
+    (81, 125),
+    (82, 126),
+    (0xe0, 59),
+    (0xe1, 56),
+    (0xe2, 58),
+    (0xe3, 55),
+    (0xe4, 62),
+    (0xe5, 60),
+    (0xe6, 61),
+    (0xe7, 54),
+];
+fn to_code(u: u16) -> Option<u16> {
+    KEYS.iter().find(|p| p.0 == u).map(|p| p.1)
+}
+fn from_code(c: u16) -> Option<u16> {
+    KEYS.iter().find(|p| p.1 == c).map(|p| p.0)
+}
