@@ -238,10 +238,16 @@ impl App {
     fn poll(&mut self) {
         if let Some(rx) = &self.events {
             while let Ok(line) = rx.try_recv() {
-                if line.starts_with("Listening on ") {
+                if self.child.is_some()
+                    && self.stopping.is_none()
+                    && line.starts_with("Listening on ")
+                {
                     self.status = "Waiting for peer".into();
                 }
-                if line.starts_with("Authenticated peer connected") {
+                if self.child.is_some()
+                    && self.stopping.is_none()
+                    && line.starts_with("Authenticated peer connected")
+                {
                     self.connected = true;
                     self.status = "Authenticated".into();
                 }
@@ -733,6 +739,26 @@ mod tests {
                     assert!(!output.shapes.is_empty());
                 }
             }
+        }
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    #[test]
+    fn delayed_worker_output_cannot_report_a_dead_process_as_connected() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("peerglide-ui-exit-{}", std::process::id()));
+        {
+            let mut app = App::load(dir.clone());
+            let (tx, rx) = mpsc::channel();
+            app.events = Some(rx);
+            tx.send("Authenticated peer connected. Ctrl+C exits".into())?;
+            app.poll();
+            assert!(!app.connected);
+            assert_eq!(app.status, "Offline");
         }
         std::fs::remove_dir_all(dir)?;
         Ok(())
