@@ -85,7 +85,6 @@ pub async fn run(
     let mut position = (0.5, 0.5);
     let mut size = (1920.0, 1080.0);
     let mut entry = edge.opposite();
-    let mut incoming_moved = false;
     let mut last_pong = 0u64;
     let mut edge_gate = EdgeGate::default();
     let mut tick = tokio::time::interval(Duration::from_millis(200));
@@ -114,7 +113,7 @@ pub async fn run(
                     Message::Acquire{lease,edge:remote_edge,along}=>{
                         let granted=along.is_finite() && (0.0..=1.0).contains(&along) && pending.is_none() && outgoing.is_none() && capture.as_ref().is_none_or(|cap|cap.gate.idle()) && recovery.receiver.acquire(lease,now,allow);
                         if granted {
-                            entry=remote_edge.opposite();position=entry_position(entry,along);incoming_moved=false;
+                            entry=remote_edge.opposite();position=entry_position(entry,along);
                             recovery.pointer(position.0,position.1)?;
                             send(&mut tx,&Message::Granted{lease}).await?;
                         }else{send(&mut tx,&Message::Denied{lease}).await?;}
@@ -124,7 +123,11 @@ pub async fn run(
                         else{send(&mut tx,&Message::Release{lease}).await?;}
                     },
                     Message::Denied{lease}=>{if pending.is_some_and(|(id,_)|id==lease){pending=None;}},
-                    Message::Input{lease,event}=>{if recovery.receiver.input(lease,event,now){recovery.input(event)?;}},
+                    Message::Input{lease,event,cursor}=>{
+                        if event.valid() && cursor.lease==lease && recovery.receiver.anchor(cursor,now) && recovery.receiver.input(lease,event,now) {
+                            recovery.pointer(cursor.x,cursor.y)?;recovery.input(event)?;
+                        }
+                    },
                     Message::Release{lease}=>{
                         if recovery.receiver.active()==Some(lease){recovery.release();}
                         if outgoing==Some(lease){outgoing=None;if let Some(cap)=&capture{cap.gate.disable();}}
@@ -139,8 +142,7 @@ pub async fn run(
                 if let Ok(m)=decode::<Motion>(&d) {if recovery.receiver.motion(m,now_ms()) {
                     recovery.pointer(m.x,m.y)?;
                     let dist=distance(entry,m.x,m.y);
-                    if dist>0.02 {incoming_moved=true;}
-                    if incoming_moved && dist<=0.001 {
+                    if dist<=0.001 {
                         recovery.release();send(&mut tx,&Message::Release{lease:m.lease}).await?;
                     }
                 }}
@@ -176,7 +178,10 @@ pub async fn run(
                         // Datagram queue pressure may discard motion; the next absolute position repairs it.
                         let _=c.send_datagram(encode(&m)?.into());
                     }},
-                    Captured::Input(event)=>{if let Some(lease)=outgoing{send(&mut tx,&Message::Input{lease,event}).await?;}},
+                    Captured::Input(event)=>{if let Some(lease)=outgoing{
+                        sequence+=1;let cursor=Motion{lease,sequence,x:position.0,y:position.1};
+                        send(&mut tx,&Message::Input{lease,event,cursor}).await?;
+                    }},
                 }
             }
         }
@@ -238,6 +243,12 @@ mod tests {
                     &mut tx,
                     &Message::Input {
                         lease: 1,
+                        cursor: Motion {
+                            lease: 1,
+                            sequence: 1,
+                            x: 0.5,
+                            y: 0.5,
+                        },
                         event: Input::Key {
                             usage: 0xe0,
                             down: true,
@@ -277,7 +288,19 @@ mod tests {
                     transport::receive(&mut rx).await?,
                     Message::Granted { lease: 3 }
                 ));
-                send(&mut tx, &Message::Release { lease: 3 }).await?;
+                c.send_datagram(
+                    encode(&Motion {
+                        lease: 3,
+                        sequence: 1,
+                        x: 0.0,
+                        y: 0.5,
+                    })?
+                    .into(),
+                )?;
+                assert!(matches!(
+                    transport::receive(&mut rx).await?,
+                    Message::Release { lease: 3 }
+                ));
                 send(
                     &mut tx,
                     &Message::Acquire {

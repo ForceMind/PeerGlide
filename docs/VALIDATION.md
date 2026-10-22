@@ -32,3 +32,10 @@ License metadata is screened with allowed SPDX alternatives (including MIT
 instead of optional LGPL choices). Bundles collect upstream notices and include
 published-source fallbacks for archives lacking separate license files. This is
 not a completed legal audit; inspect those notices before a stable release.
+
+Expanded CI caught a Linux GUI runtime dependency missing from the runner
+(`libxkbcommon-x11`). The workflow now installs the documented X11/EGL/Mesa
+runtime libraries before launching its virtual display. The correction is being
+verified on the final PR head; the failed checkpoint is not counted as passing.
+Protocol v2 adds reliable cursor anchors for discrete input and first-motion
+edge return, with dedicated loss/replay and real-session return tests.

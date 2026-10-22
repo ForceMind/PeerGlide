@@ -1,7 +1,8 @@
 //! PeerGlide's independent, versioned wire protocol. Input payloads must never be logged.
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
+pub const ALPN: &[u8] = b"peerglide/2";
 pub const MAX_FRAME: usize = 4096;
 pub const LEASE_MS: u64 = 1500;
 
@@ -43,14 +44,34 @@ impl Input {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Message {
-    Hello { version: u16 },
-    Acquire { lease: u64, edge: Edge, along: f64 },
-    Granted { lease: u64 },
-    Denied { lease: u64 },
-    Input { lease: u64, event: Input },
-    Release { lease: u64 },
-    Ping { lease: u64 },
-    Pong { lease: u64 },
+    Hello {
+        version: u16,
+    },
+    Acquire {
+        lease: u64,
+        edge: Edge,
+        along: f64,
+    },
+    Granted {
+        lease: u64,
+    },
+    Denied {
+        lease: u64,
+    },
+    Input {
+        lease: u64,
+        event: Input,
+        cursor: Motion,
+    },
+    Release {
+        lease: u64,
+    },
+    Ping {
+        lease: u64,
+    },
+    Pong {
+        lease: u64,
+    },
 }
 /// Absolute normalized motion tolerates packet loss without accumulating displacement error.
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -103,6 +124,12 @@ mod tests {
     fn roundtrip() {
         let msg = Message::Input {
             lease: 42,
+            cursor: Motion {
+                lease: 42,
+                sequence: 1,
+                x: 0.5,
+                y: 0.5,
+            },
             event: Input::Key {
                 usage: 4,
                 down: true,

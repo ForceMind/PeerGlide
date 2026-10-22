@@ -62,6 +62,15 @@ impl Receiver {
         self.sequence = m.sequence;
         true
     }
+    /// Reliable discrete input carries its own cursor snapshot, repairing lost motion.
+    /// Never lower the datagram replay watermark if a newer motion packet arrived first.
+    pub fn anchor(&mut self, m: Motion, now: u64) -> bool {
+        if !self.accepts(m.lease, now) || !m.valid() {
+            return false;
+        }
+        self.sequence = self.sequence.max(m.sequence);
+        true
+    }
     pub fn expired(&self, now: u64) -> bool {
         self.lease.is_some() && now >= self.deadline
     }
@@ -175,5 +184,60 @@ mod tests {
         assert!(!g.update(true, 900));
         g.update(false, 1000);
         assert!(g.update(true, 1100));
+    }
+}
+
+#[cfg(test)]
+mod causal_tests {
+    use super::*;
+    #[test]
+    fn reliable_cursor_anchor_repairs_loss_without_reopening_replay() {
+        let mut r = Receiver::default();
+        assert!(r.acquire(1, 0, true));
+        assert!(r.motion(
+            Motion {
+                lease: 1,
+                sequence: 9,
+                x: 0.9,
+                y: 0.5
+            },
+            1
+        ));
+        assert!(r.anchor(
+            Motion {
+                lease: 1,
+                sequence: 8,
+                x: 0.8,
+                y: 0.5
+            },
+            2
+        ));
+        assert!(!r.motion(
+            Motion {
+                lease: 1,
+                sequence: 8,
+                x: 0.8,
+                y: 0.5
+            },
+            3
+        ));
+        assert!(r.anchor(
+            Motion {
+                lease: 1,
+                sequence: 10,
+                x: 0.8,
+                y: 0.5
+            },
+            4
+        ));
+        assert!(!r.anchor(
+            Motion {
+                lease: 2,
+                sequence: 11,
+                x: 0.8,
+                y: 0.5
+            },
+            4
+        ));
     }
 }

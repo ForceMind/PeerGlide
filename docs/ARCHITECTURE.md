@@ -8,7 +8,7 @@ native tagged capture/injection and fail-open watchdog. `peerglide-desktop`:
 executable session orchestration, enrollment and probe.
 
 Both peers authenticate with explicitly exchanged certificates, TLS 1.3, ALPN
-`peerglide/1`. No 0-RTT input or insecure verifier. A fingerprint must be checked
+`peerglide/2`. No 0-RTT input or insecure verifier. A fingerprint must be checked
 over an independently trusted channel; the same untrusted channel is insufficient.
 
 The listener accepts one connection and the connector opens a reliable stream.
@@ -51,3 +51,9 @@ log history and never receives key payloads. Transfers is explicitly unavailable
 This process boundary isolates native hooks from GUI stalls. A graceful stop is
 attempted before a bounded forced-stop fallback. OS key-store/ACL provisioning,
 interactive pairing codes, tray and mDNS remain subsequent work.
+
+Reliable discrete events include a validated cursor snapshot. The receiver
+positions the pointer before applying a click/scroll/key, so a dropped motion
+datagram cannot leave a click at the previous location. Snapshot anchors never
+lower the datagram replay watermark. Return across the entry edge is allowed on
+the first reverse motion; no artificial minimum travel distance is required.

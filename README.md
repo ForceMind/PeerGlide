@@ -37,7 +37,8 @@ Home starts/listens/connects and can run a harmless transport probe. Displays
 sets the switching side. No config file editing is required.
 
 CI artifacts contain an unsigned Windows portable ZIP, macOS app bundle or
-Linux portable ZIP plus checksums and notices. They are experimental builds,
+Linux portable ZIP plus checksums and notices. Linux GUI runtime libraries
+include X11/XKB, EGL/OpenGL (or the corresponding Wayland stack). They are experimental builds,
 not stable installers. macOS signing/notarization and Windows code signing are
 pending; do not disable OS protections to open them. The Linux GUI can configure
 and probe connections, but Linux native input is not implemented.
@@ -87,8 +88,7 @@ peerglide connect 192.168.1.10:24870 --peer-cert peer.crt.der --bind 0.0.0.0:0 -
 ```
 
 - Release held keys/buttons before crossing the primary display edge.
-- Keyboard follows the pointer. Move inside the remote screen then back over
-  its entry edge to return. Edge rearming requires interior movement.
+- Keyboard follows the pointer. Move back over the remote entry edge to return. Edge rearming requires interior movement.
 - **Ctrl+Alt+Right**, then release the chord, toggles the local control target.
 - **Ctrl+Alt+Esc** immediately stops capture and requests remote release.
 - Physical input at the receiver reclaims control.

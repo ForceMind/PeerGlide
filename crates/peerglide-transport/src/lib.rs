@@ -95,14 +95,14 @@ pub fn endpoint(addr: SocketAddr, identity: &Identity, peer: &[u8]) -> Result<En
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(verifier)
         .with_single_cert(vec![identity.cert()], identity.key())?;
-    server.alpn_protocols = vec![b"peerglide/1".to_vec()];
+    server.alpn_protocols = vec![peerglide_protocol::ALPN.to_vec()];
     let mut s = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server)?));
     s.transport_config(transport());
     let mut client = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_root_certificates(roots(peer)?)
         .with_client_auth_cert(vec![identity.cert()], identity.key())?;
-    client.alpn_protocols = vec![b"peerglide/1".to_vec()];
+    client.alpn_protocols = vec![peerglide_protocol::ALPN.to_vec()];
     let mut c = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client)?));
     c.transport_config(transport());
     let mut e = Endpoint::server(s, addr)?;
@@ -155,7 +155,9 @@ mod tests {
             let (mut tx, mut rx) = c.accept_bi().await?;
             assert!(matches!(
                 receive(&mut rx).await?,
-                Message::Hello { version: 1 }
+                Message::Hello {
+                    version: peerglide_protocol::VERSION
+                }
             ));
             send(&mut tx, &Message::Granted { lease: 7 }).await?;
             let d = c.read_datagram().await?;
@@ -168,7 +170,13 @@ mod tests {
             let c = ea.connect(addr, "peerglide.local")?.await?;
             verify_peer(&c, &b.certificate)?;
             let (mut tx, mut rx) = c.open_bi().await?;
-            send(&mut tx, &Message::Hello { version: 1 }).await?;
+            send(
+                &mut tx,
+                &Message::Hello {
+                    version: peerglide_protocol::VERSION,
+                },
+            )
+            .await?;
             assert!(matches!(
                 receive(&mut rx).await?,
                 Message::Granted { lease: 7 }
