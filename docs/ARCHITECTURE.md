@@ -57,3 +57,8 @@ positions the pointer before applying a click/scroll/key, so a dropped motion
 datagram cannot leave a click at the previous location. Snapshot anchors never
 lower the datagram replay watermark. Return across the entry edge is allowed on
 the first reverse motion; no artificial minimum travel distance is required.
+
+The source cursor is parked inside its display while forwarding; this avoids
+Windows clipping hook coordinates at the screen edge and losing outward motion.
+The saved source entry position is restored on release or session drop. The
+source cursor is currently visible while parked; cursor hiding remains UX work.

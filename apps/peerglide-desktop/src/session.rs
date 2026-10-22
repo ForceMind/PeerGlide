@@ -83,6 +83,7 @@ pub async fn run(
     let mut next_lease = 0u64;
     let mut sequence = 0u64;
     let mut position = (0.5, 0.5);
+    let mut local_return = (0.5, 0.5);
     let mut size = (1920.0, 1080.0);
     let mut entry = edge.opposite();
     let mut last_pong = 0u64;
@@ -98,7 +99,7 @@ pub async fn run(
                 if pending.is_some_and(|(_,start)|now.saturating_sub(start)>1000){pending=None;}
                 if let Some(lease)=outgoing {
                     if now.saturating_sub(last_pong)>=1000 {
-                        if let Some(cap)=&capture{cap.gate.disable();}
+                        if let Some(cap)=&capture{cap.restore();}
                         outgoing=None; send(&mut tx,&Message::Release{lease}).await?;
                     }else{send(&mut tx,&Message::Ping{lease}).await?;}
                 }
@@ -119,7 +120,8 @@ pub async fn run(
                         }else{send(&mut tx,&Message::Denied{lease}).await?;}
                     },
                     Message::Granted{lease}=>{
-                        if pending.is_some_and(|(id,_)|id==lease) && capture.as_ref().is_some_and(|cap|cap.gate.try_activate()){pending=None;outgoing=Some(lease);sequence=0;last_pong=now;if let Some(cap)=&capture{cap.gate.refresh();}}
+                        let activated=if pending.is_some_and(|(id,_)|id==lease) {if let Some(cap)=&capture{cap.begin(local_return.0,local_return.1)?}else{false}}else{false};
+                        if activated{pending=None;outgoing=Some(lease);sequence=0;last_pong=now;if let Some(cap)=&capture{cap.gate.refresh();}}
                         else{send(&mut tx,&Message::Release{lease}).await?;}
                     },
                     Message::Denied{lease}=>{if pending.is_some_and(|(id,_)|id==lease){pending=None;}},
@@ -130,7 +132,7 @@ pub async fn run(
                     },
                     Message::Release{lease}=>{
                         if recovery.receiver.active()==Some(lease){recovery.release();}
-                        if outgoing==Some(lease){outgoing=None;if let Some(cap)=&capture{cap.gate.disable();}}
+                        if outgoing==Some(lease){outgoing=None;if let Some(cap)=&capture{cap.restore();}}
                     },
                     Message::Ping{lease}=>{if lease==0 || recovery.receiver.heartbeat(lease,now){send(&mut tx,&Message::Pong{lease}).await?;}},
                     Message::Pong{lease}=>{if outgoing==Some(lease){last_pong=now;if let Some(cap)=&capture{cap.gate.refresh();}}},
@@ -154,7 +156,7 @@ pub async fn run(
                 }
                 match e {
                     Captured::Emergency=>{
-                        if let Some(cap)=&capture{cap.gate.disable();}
+                        if let Some(cap)=&capture{cap.restore();}
                         pending=None; if let Some(lease)=outgoing.take(){send(&mut tx,&Message::Release{lease}).await?;}
                         if let Some(lease)=recovery.receiver.active(){recovery.release();send(&mut tx,&Message::Release{lease}).await?;}
                     },
@@ -164,13 +166,13 @@ pub async fn run(
                         let cross=edge_gate.update(distance(edge,nx,ny)<=0.001,now_ms());
                         if cross && capture.as_ref().is_some_and(|cap|cap.gate.idle()) && outgoing.is_none() && pending.is_none() && recovery.receiver.active().is_none(){
                             next_lease=next_lease.checked_add(1).ok_or_else(||anyhow::anyhow!("lease counter exhausted"))?;
-                            let along=match edge{Edge::Left|Edge::Right=>ny,_=>nx};position=entry_position(edge.opposite(),along);
+                            let along=match edge{Edge::Left|Edge::Right=>ny,_=>nx};position=entry_position(edge.opposite(),along);local_return=entry_position(edge,along);
                             pending=Some((next_lease,now_ms()));send(&mut tx,&Message::Acquire{lease:next_lease,edge,along}).await?;
                         }
                     },
                     Captured::Toggle=>{
-                        if let Some(lease)=outgoing.take(){if let Some(cap)=&capture{cap.gate.disable();}send(&mut tx,&Message::Release{lease}).await?;}
-                        else if pending.is_none() && recovery.receiver.active().is_none(){next_lease+=1;position=entry_position(edge.opposite(),0.5);pending=Some((next_lease,now_ms()));send(&mut tx,&Message::Acquire{lease:next_lease,edge,along:0.5}).await?;}
+                        if let Some(lease)=outgoing.take(){if let Some(cap)=&capture{cap.restore();}send(&mut tx,&Message::Release{lease}).await?;}
+                        else if pending.is_none() && recovery.receiver.active().is_none(){next_lease+=1;position=entry_position(edge.opposite(),0.5);local_return=entry_position(edge,0.5);pending=Some((next_lease,now_ms()));send(&mut tx,&Message::Acquire{lease:next_lease,edge,along:0.5}).await?;}
                     },
                     Captured::Motion{dx,dy}=>{if let Some(lease)=outgoing {
                         position.0=(position.0+dx/size.0).clamp(0.0,1.0);position.1=(position.1+dy/size.1).clamp(0.0,1.0);

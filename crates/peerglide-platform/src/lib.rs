@@ -107,18 +107,46 @@ impl Drop for CallbackGuard {
 }
 impl Drop for CaptureSession {
     fn drop(&mut self) {
-        self.gate.disable();
+        self.restore();
     }
 }
 pub struct CaptureSession {
     pub gate: CaptureGate,
+    return_position: std::sync::Mutex<Option<(f64, f64)>>,
+}
+impl CaptureSession {
+    pub fn begin(&self, return_x: f64, return_y: f64) -> Result<bool> {
+        if !self.gate.try_activate() {
+            return Ok(false);
+        }
+        *self
+            .return_position
+            .lock()
+            .map_err(|_| anyhow::anyhow!("capture position lock poisoned"))? =
+            Some((return_x, return_y));
+        // Windows clips low-level hook coordinates at display boundaries. Park
+        // the physical cursor inside the screen so blocked moves retain deltas.
+        pointer(0.5, 0.5)?;
+        Ok(true)
+    }
+    pub fn restore(&self) {
+        self.gate.disable();
+        if let Ok(mut position) = self.return_position.lock() {
+            if let Some((x, y)) = position.take() {
+                let _ = pointer(x, y);
+            }
+        }
+    }
 }
 pub fn capture(tx: mpsc::Sender<Captured>) -> Result<CaptureSession> {
     let gate = CaptureGate::default();
     #[cfg(any(windows, target_os = "macos"))]
     {
         native::capture(tx, gate.clone())?;
-        Ok(CaptureSession { gate })
+        Ok(CaptureSession {
+            gate,
+            return_position: std::sync::Mutex::new(None),
+        })
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
