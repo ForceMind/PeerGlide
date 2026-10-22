@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/ForceMind/PeerGlide"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rcgen = "0.13"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+peerglide-protocol = { path = "crates/peerglide-protocol" }
+peerglide-core = { path = "crates/peerglide-core" }
+peerglide-transport = { path = "crates/peerglide-transport" }
+peerglide-platform = { path = "crates/peerglide-platform" }
+
+[profile.release]
+lto = "thin"
+strip = true
