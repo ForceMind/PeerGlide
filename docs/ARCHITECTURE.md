@@ -8,7 +8,7 @@ native tagged capture/injection and fail-open watchdog. `peerglide-desktop`:
 executable session orchestration, enrollment and probe.
 
 Both peers authenticate with explicitly exchanged certificates, TLS 1.3, ALPN
-`peerglide/2`. No 0-RTT input or insecure verifier. A fingerprint must be checked
+`peerglide/3`. No 0-RTT input or insecure verifier. A fingerprint must be checked
 over an independently trusted channel; the same untrusted channel is insufficient.
 
 The listener accepts one connection and the connector opens a reliable stream.
@@ -62,3 +62,17 @@ The source cursor is parked inside its display while forwarding; this avoids
 Windows clipping hook coordinates at the screen edge and losing outward motion.
 The saved source entry position is restored on release or session drop. The
 source cursor is currently visible while parked; cursor hiding remains UX work.
+
+
+### Ordered normal return (protocol v3)
+
+The source owns normal edge-return detection. It stops local suppression and
+sends Release on the same reliable stream as preceding discrete inputs. Motion
+datagrams only update the receiver cursor and never terminate the lease. This
+prevents an edge datagram from overtaking a click/key event and revoking its lease.
+Receiver timeout, emergency and physical local preemption remain independent:
+safety interruptions may discard pending remote input intentionally.
+
+ALPN/version v3 rejects older peers rather than mixing the old receiver-driven
+return semantics. Both computers must update together. This is a behavioral
+protocol change despite unchanged message shapes.
