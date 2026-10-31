@@ -7,6 +7,7 @@ use windows_sys::Win32::{
 };
 
 const TAG: usize = 0x50474c44;
+thread_local! { static WHEEL:RefCell<[i32; 2]>=const {RefCell::new([0; 2])}; }
 thread_local! { static STATE:RefCell<Option<HookState>>=const {RefCell::new(None)}; }
 pub fn capture(tx: mpsc::Sender<Captured>, gate: CaptureGate) -> Result<()> {
     let (ready, rx) = std::sync::mpsc::sync_channel(1);
@@ -114,10 +115,14 @@ unsafe extern "system" fn mouse_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
                     }
                     WM_MOUSEWHEEL => s.emit(Captured::Input(Input::Scroll {
                         x: 0,
-                        y: ((e.mouseData >> 16) as i16) / 120,
+                        y: WHEEL.with_borrow_mut(|r| {
+                            wheel_steps(&mut r[1], (e.mouseData >> 16) as i16)
+                        }),
                     })),
                     WM_MOUSEHWHEEL => s.emit(Captured::Input(Input::Scroll {
-                        x: ((e.mouseData >> 16) as i16) / 120,
+                        x: WHEEL.with_borrow_mut(|r| {
+                            wheel_steps(&mut r[0], (e.mouseData >> 16) as i16)
+                        }),
                         y: 0,
                     })),
                     _ => (),
@@ -130,6 +135,12 @@ unsafe extern "system" fn mouse_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
         }
     }
     CallNextHookEx(null_mut(), code, w, l)
+}
+// Preserve sub-detent wheel increments rather than dropping high-resolution input.
+fn wheel_steps(remainder: &mut i32, delta: i16) -> i16 {
+    let total = *remainder + i32::from(delta);
+    *remainder = total % 120;
+    (total / 120) as i16
 }
 pub fn inject(event: Input) -> Result<()> {
     unsafe {
@@ -278,6 +289,18 @@ unsafe fn initial_buttons() -> std::collections::BTreeSet<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn high_resolution_wheel_preserves_remainder_and_direction() {
+        let mut remainder = 0;
+        assert_eq!(wheel_steps(&mut remainder, 30), 0);
+        assert_eq!(wheel_steps(&mut remainder, 30), 0);
+        assert_eq!(wheel_steps(&mut remainder, 90), 1);
+        assert_eq!(remainder, 30);
+        assert_eq!(wheel_steps(&mut remainder, -60), 0);
+        assert_eq!(wheel_steps(&mut remainder, -90), -1);
+        assert_eq!(remainder, 0);
+        assert_eq!(wheel_steps(&mut remainder, 240), 2);
+    }
     #[test]
     fn key_positions_roundtrip() {
         for u in 4..=0xe7 {

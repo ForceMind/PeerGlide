@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use peerglide_core::{EdgeGate, Receiver};
+use peerglide_core::{EdgeGate, PendingReleases, Receiver};
 use peerglide_platform::{self as platform, now_ms, Captured};
 use peerglide_protocol::{decode, encode, Edge, Input, Message, Motion};
 use peerglide_transport as transport;
@@ -9,14 +9,15 @@ use tokio::sync::mpsc;
 struct Recovery {
     receiver: Receiver,
     native: bool,
+    pending_releases: PendingReleases,
 }
 impl Recovery {
-    fn release(&mut self) {
-        for event in self.receiver.release() {
-            if self.native {
-                let _ = platform::inject(event);
-            }
-        }
+    fn release(&mut self) -> Result<()> {
+        self.pending_releases.extend(self.receiver.release());
+        let native = self.native;
+        self.pending_releases.flush(|event| {
+            if native { platform::inject(event) } else { Ok(()) }
+        }).map_err(|remaining| anyhow::anyhow!("native input cleanup failed: {remaining} releases remain pending; session stopped"))
     }
     fn input(&mut self, event: Input) -> Result<()> {
         if self.native {
@@ -33,7 +34,9 @@ impl Recovery {
 }
 impl Drop for Recovery {
     fn drop(&mut self) {
-        self.release();
+        if self.release().is_err() {
+            eprintln!("Native input cleanup remains incomplete; check local input state.");
+        }
     }
 }
 async fn send(tx: &mut quinn::SendStream, m: &Message) -> Result<()> {
@@ -77,6 +80,7 @@ pub async fn run(
     let mut recovery = Recovery {
         receiver: Receiver::default(),
         native,
+        pending_releases: PendingReleases::default(),
     };
     let mut pending: Option<(u64, u64)> = None;
     let mut outgoing: Option<u64> = None;
@@ -95,7 +99,7 @@ pub async fn run(
             _=c.closed()=>return Ok(()),
             _=tick.tick()=>{
                 let now=now_ms();
-                if recovery.receiver.expired(now){recovery.release();}
+                if recovery.receiver.expired(now){recovery.release()?;}
                 if pending.is_some_and(|(_,start)|now.saturating_sub(start)>1000){pending=None;}
                 if let Some(lease)=outgoing {
                     if now.saturating_sub(last_pong)>=1000 {
@@ -131,7 +135,7 @@ pub async fn run(
                         }
                     },
                     Message::Release{lease}=>{
-                        if recovery.receiver.active()==Some(lease){recovery.release();}
+                        if recovery.receiver.active()==Some(lease){recovery.release()?;}
                         if outgoing==Some(lease){outgoing=None;if let Some(cap)=&capture{cap.restore();}}
                     },
                     Message::Ping{lease}=>{if lease==0 || recovery.receiver.heartbeat(lease,now){send(&mut tx,&Message::Pong{lease}).await?;}},
@@ -145,20 +149,20 @@ pub async fn run(
                     recovery.pointer(m.x,m.y)?;
                     let dist=distance(entry,m.x,m.y);
                     if dist<=0.001 {
-                        recovery.release();send(&mut tx,&Message::Release{lease:m.lease}).await?;
+                        recovery.release()?;send(&mut tx,&Message::Release{lease:m.lease}).await?;
                     }
                 }}
             },
             e=input.recv(),if native=>{
                 let Some(e)=e else{bail!("native capture channel closed");};
                 if matches!(e,Captured::Position{..}|Captured::Input(_)|Captured::Toggle) {
-                    if let Some(lease)=recovery.receiver.active(){recovery.release();send(&mut tx,&Message::Release{lease}).await?;}
+                    if let Some(lease)=recovery.receiver.active(){recovery.release()?;send(&mut tx,&Message::Release{lease}).await?;}
                 }
                 match e {
                     Captured::Emergency=>{
                         if let Some(cap)=&capture{cap.restore();}
                         pending=None; if let Some(lease)=outgoing.take(){send(&mut tx,&Message::Release{lease}).await?;}
-                        if let Some(lease)=recovery.receiver.active(){recovery.release();send(&mut tx,&Message::Release{lease}).await?;}
+                        if let Some(lease)=recovery.receiver.active(){recovery.release()?;send(&mut tx,&Message::Release{lease}).await?;}
                     },
                     Captured::Position{x,y,width,height}=>{
                         size=(width.max(1.0),height.max(1.0));

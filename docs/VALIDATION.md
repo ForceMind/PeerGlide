@@ -39,3 +39,17 @@ runtime libraries before launching its virtual display. The correction is being
 verified on the final PR head; the failed checkpoint is not counted as passing.
 Protocol v2 adds reliable cursor anchors for discrete input and first-motion
 edge return, with dedicated loss/replay and real-session return tests.
+
+
+## Recovery hardening follow-up
+
+Pending-release fault tests cover transient injector failure, permanent failure
+with a bounded three-attempt flush, retention for final cleanup, and continued
+release of other inputs when one release fails. Session recovery now propagates
+cleanup failure and stops the session; Drop performs another bounded cleanup
+attempt and reports incomplete cleanup without logging key contents.
+
+Windows wheel deltas now retain sub-detent remainder independently on each axis.
+A regression test covers accumulation, direction reversal and multi-detent input.
+These tests do not prove OS acceptance: persistent OS rejection or process death
+can still prevent synthetic release. Physical acceptance remains issue #3.

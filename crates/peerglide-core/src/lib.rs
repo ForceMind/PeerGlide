@@ -241,3 +241,104 @@ mod causal_tests {
         ));
     }
 }
+
+/// Retains failed key/button releases until acknowledged by the native backend.
+/// This is bounded by Receiver's finite tracked input set, never by event volume.
+#[derive(Default)]
+pub struct PendingReleases(Vec<Input>);
+impl PendingReleases {
+    pub fn extend(&mut self, events: impl IntoIterator<Item = Input>) {
+        self.0.extend(events);
+    }
+    /// Retry each failed release at most three times; successful releases are removed.
+    /// The callback can be a native injector or a fault-injecting test backend.
+    pub fn flush<E>(
+        &mut self,
+        mut inject: impl FnMut(Input) -> Result<(), E>,
+    ) -> Result<(), usize> {
+        for _ in 0..3 {
+            self.0.retain(|event| inject(*event).is_err());
+            if self.0.is_empty() {
+                return Ok(());
+            }
+        }
+        Err(self.0.len())
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    fn key() -> Input {
+        Input::Key {
+            usage: 0xe0,
+            down: false,
+        }
+    }
+    #[test]
+    fn transient_failure_is_retried_and_success_is_not_replayed() {
+        let mut pending = PendingReleases::default();
+        pending.extend([key()]);
+        let mut calls = 0;
+        assert_eq!(
+            pending.flush(|_| {
+                calls += 1;
+                if calls < 3 {
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            }),
+            Ok(())
+        );
+        assert_eq!(calls, 3);
+        assert_eq!(
+            pending.flush::<()>(|_| panic!("successful release replayed")),
+            Ok(())
+        );
+    }
+    #[test]
+    fn permanent_failure_is_bounded_and_retained_for_cleanup() {
+        let mut pending = PendingReleases::default();
+        pending.extend([key()]);
+        let mut calls = 0;
+        assert_eq!(
+            pending.flush(|_| {
+                calls += 1;
+                Err(())
+            }),
+            Err(1)
+        );
+        assert_eq!(calls, 3);
+        assert_eq!(
+            pending.flush(|event| {
+                assert!(matches!(event, Input::Key { down: false, .. }));
+                Ok::<_, ()>(())
+            }),
+            Ok(())
+        );
+    }
+    #[test]
+    fn one_failed_release_does_not_block_other_releases() {
+        let mut pending = PendingReleases::default();
+        pending.extend([
+            key(),
+            Input::Button {
+                button: 1,
+                down: false,
+            },
+        ]);
+        let mut buttons = 0;
+        assert_eq!(
+            pending.flush(|event| match event {
+                Input::Key { .. } => Err(()),
+                _ => {
+                    buttons += 1;
+                    Ok(())
+                }
+            }),
+            Err(1)
+        );
+        assert_eq!(buttons, 1);
+    }
+}
