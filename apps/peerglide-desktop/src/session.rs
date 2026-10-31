@@ -89,7 +89,6 @@ pub async fn run(
     let mut position = (0.5, 0.5);
     let mut local_return = (0.5, 0.5);
     let mut size = (1920.0, 1080.0);
-    let mut entry = edge.opposite();
     let mut last_pong = 0u64;
     let mut edge_gate = EdgeGate::default();
     let mut tick = tokio::time::interval(Duration::from_millis(200));
@@ -118,7 +117,7 @@ pub async fn run(
                     Message::Acquire{lease,edge:remote_edge,along}=>{
                         let granted=along.is_finite() && (0.0..=1.0).contains(&along) && pending.is_none() && outgoing.is_none() && capture.as_ref().is_none_or(|cap|cap.gate.idle()) && recovery.receiver.acquire(lease,now,allow);
                         if granted {
-                            entry=remote_edge.opposite();position=entry_position(entry,along);
+                            position=entry_position(remote_edge.opposite(),along);
                             recovery.pointer(position.0,position.1)?;
                             send(&mut tx,&Message::Granted{lease}).await?;
                         }else{send(&mut tx,&Message::Denied{lease}).await?;}
@@ -147,10 +146,6 @@ pub async fn run(
                 let d=match d {Ok(d)=>d,Err(_) if normal_close(&c)=>return Ok(()),Err(e)=>return Err(e.into())};
                 if let Ok(m)=decode::<Motion>(&d) {if recovery.receiver.motion(m,now_ms()) {
                     recovery.pointer(m.x,m.y)?;
-                    let dist=distance(entry,m.x,m.y);
-                    if dist<=0.001 {
-                        recovery.release()?;send(&mut tx,&Message::Release{lease:m.lease}).await?;
-                    }
                 }}
             },
             e=input.recv(),if native=>{
@@ -181,8 +176,16 @@ pub async fn run(
                     Captured::Motion{dx,dy}=>{if let Some(lease)=outgoing {
                         position.0=(position.0+dx/size.0).clamp(0.0,1.0);position.1=(position.1+dy/size.1).clamp(0.0,1.0);
                         sequence+=1;let m=Motion{lease,sequence,x:position.0,y:position.1};
-                        // Datagram queue pressure may discard motion; the next absolute position repairs it.
-                        let _=c.send_datagram(encode(&m)?.into());
+                        if returned_to_source(edge, position.0, position.1) {
+                            // Same reliable stream as earlier discrete input: motion cannot
+                            // overtake those events and revoke their lease at the receiver.
+                            outgoing=None;
+                            if let Some(cap)=&capture{cap.restore();}
+                            send(&mut tx,&Message::Release{lease}).await?;
+                        } else {
+                            // Datagram queue pressure may discard motion; the next absolute position repairs it.
+                            let _=c.send_datagram(encode(&m)?.into());
+                        }
                     }},
                     Captured::Input(event)=>{if let Some(lease)=outgoing{
                         sequence+=1;let cursor=Motion{lease,sequence,x:position.0,y:position.1};
@@ -192,6 +195,9 @@ pub async fn run(
             }
         }
     }
+}
+fn returned_to_source(source_edge: Edge, x: f64, y: f64) -> bool {
+    distance(source_edge.opposite(), x, y) <= 0.001
 }
 fn distance(edge: Edge, x: f64, y: f64) -> f64 {
     match edge {
@@ -215,6 +221,21 @@ mod tests {
     use super::*;
     use transport::Identity;
 
+    #[test]
+    fn source_return_boundary_handles_all_edges_without_minimum_travel() {
+        for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
+            let entry = entry_position(edge.opposite(), 0.5);
+            assert!(!returned_to_source(edge, entry.0, entry.1));
+            assert!(!returned_to_source(edge, 0.5, 0.5));
+            let boundary = match edge {
+                Edge::Left => (1.0, 0.5),
+                Edge::Right => (0.0, 0.5),
+                Edge::Top => (0.5, 1.0),
+                Edge::Bottom => (0.5, 0.0),
+            };
+            assert!(returned_to_source(edge, boundary.0, boundary.1));
+        }
+    }
     async fn exercise(allow: bool) -> Result<()> {
         let a = Identity::generate()?;
         let b = Identity::generate()?;
@@ -303,9 +324,50 @@ mod tests {
                     })?
                     .into(),
                 )?;
+                // Let the edge datagram overtake a deliberately delayed reliable input.
+                // It must not terminate the lease or discard that input.
+                assert!(tokio::time::timeout(
+                    Duration::from_millis(100),
+                    transport::receive(&mut rx)
+                )
+                .await
+                .is_err());
+                send(
+                    &mut tx,
+                    &Message::Input {
+                        lease: 3,
+                        event: Input::Button {
+                            button: 1,
+                            down: true,
+                        },
+                        cursor: Motion {
+                            lease: 3,
+                            sequence: 2,
+                            x: 0.5,
+                            y: 0.5,
+                        },
+                    },
+                )
+                .await?;
+                send(&mut tx, &Message::Ping { lease: 3 }).await?;
                 assert!(matches!(
                     transport::receive(&mut rx).await?,
-                    Message::Release { lease: 3 }
+                    Message::Pong { lease: 3 }
+                ));
+                // Source-originated release shares the discrete input stream.
+                send(&mut tx, &Message::Release { lease: 3 }).await?;
+                send(
+                    &mut tx,
+                    &Message::Acquire {
+                        lease: 4,
+                        edge: Edge::Right,
+                        along: 0.5,
+                    },
+                )
+                .await?;
+                assert!(matches!(
+                    transport::receive(&mut rx).await?,
+                    Message::Granted { lease: 4 }
                 ));
                 send(
                     &mut tx,

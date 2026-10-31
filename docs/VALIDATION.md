@@ -53,3 +53,17 @@ Windows wheel deltas now retain sub-detent remainder independently on each axis.
 A regression test covers accumulation, direction reversal and multi-detent input.
 These tests do not prove OS acceptance: persistent OS rejection or process death
 can still prevent synthetic release. Physical acceptance remains issue #3.
+
+
+## Ordered return regression (protocol v3)
+
+A live QUIC regression sends an edge datagram before deliberately delayed reliable
+button input. The v2 implementation fails: it immediately sends Release instead
+of retaining the lease. In v3, the edge datagram does not revoke the lease; delayed
+input and heartbeat remain valid, and a subsequent reliable Release allows a new
+lease. Source boundary tests cover all four edges and immediate reverse motion.
+
+Local workspace tests (22 Linux tests), strict clippy and fmt passed. Real OS
+input acceptance remains pending. Updating one peer alone is unsupported; v3 ALPN
+intentionally rejects v2. Safety timeout and local preemption are still allowed
+to interrupt input without draining it.

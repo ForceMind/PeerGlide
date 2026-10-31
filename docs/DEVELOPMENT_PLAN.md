@@ -22,8 +22,8 @@ native matrix builds. Do not force updates or change repository visibility.
    transient/permanent failure tests. Implemented in the recovery follow-up.
 2. Preserve Windows high-resolution wheel remainder. Implemented; native runtime
    acceptance still pending.
-3. Reproduce reliable-stream/datagram ordering at edge return, then implement a
-   causally ordered handoff if the test confirms premature lease termination.
+3. Edge-ordering regression reproduced on protocol v2 and fixed in v3 using
+   source-originated reliable release. Real desktop acceptance remains pending.
 4. Define unknown-key/capability behavior; expand layout and extended-key tests.
 5. Add explicit capture-thread shutdown and reclamation before in-process reconnect.
 6. Replace GUI stdout-prefix state parsing with structured worker events; allow

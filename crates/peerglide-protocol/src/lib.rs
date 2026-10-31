@@ -1,8 +1,8 @@
 //! PeerGlide's independent, versioned wire protocol. Input payloads must never be logged.
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u16 = 2;
-pub const ALPN: &[u8] = b"peerglide/2";
+pub const VERSION: u16 = 3;
+pub const ALPN: &[u8] = b"peerglide/3";
 pub const MAX_FRAME: usize = 4096;
 pub const LEASE_MS: u64 = 1500;
 
