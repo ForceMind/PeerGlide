@@ -1844,6 +1844,7 @@ dependencies = [
  "peerglide-protocol",
  "peerglide-transport",
  "quinn",
+ "serde_json",
  "tokio",
 ]
 
@@ -1853,6 +1854,7 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "eframe",
+ "peerglide-protocol",
  "peerglide-transport",
  "serde",
  "serde_json",

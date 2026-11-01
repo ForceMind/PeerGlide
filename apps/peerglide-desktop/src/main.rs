@@ -1,7 +1,10 @@
 mod session;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use peerglide_protocol::{Edge, Message, VERSION};
+use peerglide_protocol::{
+    worker::{WorkerEvent, WorkerState},
+    Edge, Message, VERSION,
+};
 use peerglide_transport as transport;
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
@@ -90,8 +93,18 @@ async fn main() -> Result<()> {
         } => run(options, Some(address), probe).await,
     }
 }
+fn worker_event(managed: bool, state: WorkerState) {
+    if managed {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        let _ = serde_json::to_writer(&mut out, &WorkerEvent::new(state));
+        let _ = writeln!(out);
+        let _ = out.flush();
+    }
+}
 async fn run(o: Options, address: Option<SocketAddr>, probe: bool) -> Result<()> {
-    if o.managed {
+    let managed = o.managed;
+    let result = if o.managed {
         let (stop, stopped) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
             use std::io::BufRead;
@@ -107,7 +120,16 @@ async fn run(o: Options, address: Option<SocketAddr>, probe: bool) -> Result<()>
         tokio::select! {result=run_inner(o,address,probe)=>result,_=stopped=>Ok(())}
     } else {
         run_inner(o, address, probe).await
-    }
+    };
+    worker_event(
+        managed,
+        if result.is_ok() {
+            WorkerState::Stopped
+        } else {
+            WorkerState::Failed
+        },
+    );
+    result
 }
 async fn run_inner(o: Options, address: Option<SocketAddr>, probe: bool) -> Result<()> {
     let id = transport::Identity::load(&o.identity)?;
@@ -128,6 +150,7 @@ async fn run_inner(o: Options, address: Option<SocketAddr>, probe: bool) -> Resu
         o.allow_control,
         o.native
     );
+    worker_event(o.managed, WorkerState::Listening);
     let (c, mut tx, mut rx) = if let Some(addr) = address {
         let c = tokio::time::timeout(Duration::from_secs(5), e.connect(addr, "peerglide.local")?)
             .await??;
@@ -148,6 +171,7 @@ async fn run_inner(o: Options, address: Option<SocketAddr>, probe: bool) -> Resu
         "unsupported protocol version"
     );
     println!("Authenticated peer connected. Ctrl+C exits; Ctrl+Alt+Esc restores local input.");
+    worker_event(o.managed, WorkerState::Authenticated);
     if probe {
         transport::send(&mut tx, &Message::Ping { lease: 0 }).await?;
         anyhow::ensure!(
@@ -158,6 +182,7 @@ async fn run_inner(o: Options, address: Option<SocketAddr>, probe: bool) -> Resu
             "probe response mismatch"
         );
         println!("PASS: mutual TLS, protocol negotiation, reliable roundtrip.");
+        worker_event(o.managed, WorkerState::ProbePassed);
         c.close(0u8.into(), b"probe complete");
         e.wait_idle().await;
         return Ok(());

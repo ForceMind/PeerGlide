@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 use anyhow::{Context, Result};
 use eframe::egui::{self, Color32, RichText, Vec2};
+use peerglide_protocol::worker::{WorkerEvent, WorkerState};
 use peerglide_transport::{self as transport, Identity};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -46,6 +47,10 @@ enum Page {
     Transfers,
     Settings,
 }
+enum WorkerOutput {
+    State(WorkerState),
+    Diagnostic(String),
+}
 struct App {
     dir: PathBuf,
     config: Config,
@@ -54,7 +59,7 @@ struct App {
     compared: bool,
     notice: String,
     child: Option<Child>,
-    events: Option<mpsc::Receiver<String>>,
+    events: Option<mpsc::Receiver<WorkerOutput>>,
     status: String,
     connected: bool,
     logs: VecDeque<String>,
@@ -203,18 +208,22 @@ impl App {
             cmd.creation_flags(0x08000000);
         }
         let mut child = cmd.spawn()?;
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(128);
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         let output_tx = tx.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let _ = output_tx.send(line);
+                let event = match WorkerEvent::parse(&line) {
+                    Some(event) => WorkerOutput::State(event.state),
+                    None => WorkerOutput::Diagnostic(line.chars().take(600).collect()),
+                };
+                let _ = output_tx.try_send(event);
             }
         });
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                let _ = tx.send(line);
+                let _ = tx.try_send(WorkerOutput::Diagnostic(line.chars().take(600).collect()));
             }
         });
         self.child = Some(child);
@@ -231,32 +240,53 @@ impl App {
                 let _ = stdin.write_all(b"stop\n");
                 let _ = stdin.flush();
             }
+            self.connected = false;
             self.stopping = Some(Instant::now());
             self.status = "Restoring local control".into();
         }
     }
+    fn revoke(&mut self) -> Result<()> {
+        self.stop();
+        self.connected = false;
+        self.config.fingerprint = None;
+        self.config.allow = false;
+        match std::fs::remove_file(self.dir.join("trusted-peer.crt.der")) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e).context("peer disabled but removing certificate failed"),
+        }
+        self.save_config().context("persist revoked peer trust")
+    }
     fn poll(&mut self) {
         if let Some(rx) = &self.events {
-            while let Ok(line) = rx.try_recv() {
-                if self.child.is_some()
-                    && self.stopping.is_none()
-                    && line.starts_with("Listening on ")
-                {
-                    self.status = "Waiting for peer".into();
-                }
-                if self.child.is_some()
-                    && self.stopping.is_none()
-                    && line.starts_with("Authenticated peer connected")
-                {
-                    self.connected = true;
-                    self.status = "Authenticated".into();
-                }
-                if line.starts_with("PASS:") {
-                    self.notice = "Connection probe passed. No input was injected.".into();
-                }
-                self.logs.push_back(line.chars().take(600).collect());
-                if self.logs.len() > 100 {
-                    self.logs.pop_front();
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    WorkerOutput::State(state)
+                        if self.child.is_some() && self.stopping.is_none() =>
+                    {
+                        match state {
+                            WorkerState::Listening => self.status = "Waiting for peer".into(),
+                            WorkerState::Authenticated => {
+                                self.connected = true;
+                                self.status = "Authenticated".into();
+                            }
+                            WorkerState::ProbePassed => {
+                                self.notice =
+                                    "Connection probe passed. No input was injected.".into()
+                            }
+                            WorkerState::Stopped | WorkerState::Failed => {
+                                self.connected = false;
+                                self.status = "Worker stopped".into();
+                            }
+                        }
+                    }
+                    WorkerOutput::Diagnostic(line) => {
+                        self.logs.push_back(line);
+                        if self.logs.len() > 100 {
+                            self.logs.pop_front();
+                        }
+                    }
+                    _ => (),
                 }
             }
         }
@@ -443,14 +473,13 @@ impl App {
                 ui.label("Enrolled fingerprint");
                 ui.monospace(fp);
             }
-            if self.config.fingerprint.is_some() && ui.button("Revoke peer trust").clicked() {
-                self.config.fingerprint = None;
-                self.config.allow = false;
-                let _ = std::fs::remove_file(self.dir.join("trusted-peer.crt.der"));
-                self.save();
-                self.notice = "Peer trust revoked.".into();
-            }
         });
+        if self.config.fingerprint.is_some()
+            && ui.button("Disconnect and revoke peer trust").clicked()
+        {
+            let result = self.revoke();
+            self.feedback(result, "Peer trust revoked; active worker is stopping.");
+        }
         ui.add_space(18.0);
         ui.weak("Automatic discovery and pairing codes are planned. Enrollment currently uses public certificate files.");
     }
@@ -812,14 +841,56 @@ mod tests {
 mod lifecycle_tests {
     use super::*;
     #[test]
+    fn revoke_clears_grants_and_stale_diagnostics_cannot_authenticate() -> Result<()> {
+        let fixture = super::tests::Fixture::new()?;
+        let mut app = App::load(fixture.path.clone());
+        app.config.fingerprint = Some("test".into());
+        app.config.allow = true;
+        app.revoke()?;
+        assert!(app.config.fingerprint.is_none());
+        assert!(!app.config.allow);
+        let loaded = App::load(fixture.path.clone());
+        assert!(loaded.config.fingerprint.is_none());
+        assert!(!loaded.config.allow);
+        drop(loaded);
+        let (tx, rx) = mpsc::sync_channel(128);
+        app.events = Some(rx);
+        tx.send(WorkerOutput::Diagnostic(
+            "Authenticated peer connected".into(),
+        ))?;
+        app.poll();
+        assert!(!app.connected);
+        drop(app);
+        fixture.close()?;
+        Ok(())
+    }
+    #[test]
+    fn revocation_persistence_failure_is_reported() -> Result<()> {
+        let fixture = super::tests::Fixture::new()?;
+        let mut app = App::load(fixture.path.clone());
+        app.config.fingerprint = Some("test".into());
+        app.config.allow = true;
+        std::fs::create_dir(fixture.path.join("settings.tmp"))?;
+        assert!(app
+            .revoke()
+            .unwrap_err()
+            .to_string()
+            .contains("persist revoked"));
+        assert!(!app.config.allow);
+        assert!(app.config.fingerprint.is_none());
+        drop(app);
+        fixture.close()?;
+        Ok(())
+    }
+    #[test]
     fn delayed_worker_output_cannot_report_a_dead_process_as_connected() -> Result<()> {
         let fixture = super::tests::Fixture::new()?;
         let dir = fixture.path.clone();
         {
             let mut app = App::load(dir.clone());
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = mpsc::sync_channel(128);
             app.events = Some(rx);
-            tx.send("Authenticated peer connected. Ctrl+C exits".into())?;
+            tx.send(WorkerOutput::State(WorkerState::Authenticated))?;
             app.poll();
             assert!(!app.connected);
             assert_eq!(app.status, "Offline");
