@@ -131,7 +131,7 @@ remain pending; these tests do not claim those capabilities or physical acceptan
 
 C03 bounded-join follow-up: a completion notification can precede blocked TLS
 cleanup. The new regression failed before the fix (shutdown returned success
-only after rescue released the destructor despite a zero budget). shutdown now
-checks actual thread completion within its remaining budget before join. Native
-loop reservation covers hook ownership through native cleanup; TLS completion is
-separately budgeted. This does not establish real OS handle-count acceptance.
+only after rescue released the destructor despite a zero budget). The first is_finished-based fix also failed all three platforms in run
+41327242373; it was not merged. A dedicated reaper now owns join and the capture
+reservation through all thread-local destruction. The caller waits only on a
+bounded acknowledgement, so timeout never enters join on the caller thread. This does not establish real OS handle-count acceptance.

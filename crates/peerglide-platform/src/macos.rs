@@ -66,46 +66,48 @@ pub fn capture(tx: mpsc::Sender<Captured>, gate: CaptureGate) -> Result<CaptureT
     ensure!(unsafe {AXIsProcessTrusted()},"grant Accessibility and Input Monitoring permissions in System Settings, then restart PeerGlide");
     let reservation = capture_thread::Reservation::acquire()?;
     let (ready, rx) = std::sync::mpsc::sync_channel(1);
-    let thread = CaptureThread::spawn(move |stop| unsafe {
-        let _reservation = reservation;
-        let state = HookState {
-            tx,
-            gate,
-            keys: initial_keys(),
-            buttons: initial_buttons(),
-            toggle_armed: false,
-        };
-        state.update_held();
-        STATE.set(Some(state));
-        let mask = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 22, 25, 26, 27]
-            .iter()
-            .fold(0, |a, n| a | 1u64 << n);
-        let tap = CGEventTapCreate(0, 0, 0, mask, callback, null_mut());
-        if tap.is_null() {
-            let _ = ready.send(false);
-            return;
-        }
-        let source = CFMachPortCreateRunLoopSource(null_mut(), tap, 0);
-        if source.is_null() {
-            CFRelease(tap);
-            let _ = ready.send(false);
-            return;
-        }
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
-        CGEventTapEnable(tap, true);
-        let _ = ready.send(true);
-        while !stop.load(Ordering::Acquire) {
-            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
-        }
-        CGEventTapEnable(tap, false);
-        STATE.with_borrow(|s| {
-            if let Some(s) = s {
-                s.gate.disable();
+    let thread = CaptureThread::spawn_owned(
+        move |stop| unsafe {
+            let state = HookState {
+                tx,
+                gate,
+                keys: initial_keys(),
+                buttons: initial_buttons(),
+                toggle_armed: false,
+            };
+            state.update_held();
+            STATE.set(Some(state));
+            let mask = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 22, 25, 26, 27]
+                .iter()
+                .fold(0, |a, n| a | 1u64 << n);
+            let tap = CGEventTapCreate(0, 0, 0, mask, callback, null_mut());
+            if tap.is_null() {
+                let _ = ready.send(false);
+                return;
             }
-        });
-        CFRelease(source);
-        CFRelease(tap);
-    });
+            let source = CFMachPortCreateRunLoopSource(null_mut(), tap, 0);
+            if source.is_null() {
+                CFRelease(tap);
+                let _ = ready.send(false);
+                return;
+            }
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
+            CGEventTapEnable(tap, true);
+            let _ = ready.send(true);
+            while !stop.load(Ordering::Acquire) {
+                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+            }
+            CGEventTapEnable(tap, false);
+            STATE.with_borrow(|s| {
+                if let Some(s) = s {
+                    s.gate.disable();
+                }
+            });
+            CFRelease(source);
+            CFRelease(tap);
+        },
+        reservation,
+    );
     ensure!(
         rx.recv_timeout(std::time::Duration::from_secs(3))?,
         "CoreGraphics event tap unavailable; check Input Monitoring permission"
