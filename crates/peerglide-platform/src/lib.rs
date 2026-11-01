@@ -7,6 +7,10 @@ use std::sync::{
 };
 use std::time::Instant;
 use tokio::sync::mpsc;
+#[cfg(any(windows, target_os = "macos", test))]
+mod capture_thread;
+#[cfg(any(windows, target_os = "macos"))]
+use capture_thread::CaptureThread;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -108,14 +112,27 @@ impl Drop for CallbackGuard {
 }
 impl Drop for CaptureSession {
     fn drop(&mut self) {
-        self.restore();
+        if self.shutdown().is_err() {
+            eprintln!("Native capture shutdown incomplete; new capture remains blocked until the old thread exits.");
+        }
     }
 }
 pub struct CaptureSession {
     pub gate: CaptureGate,
+    #[cfg(any(windows, target_os = "macos"))]
+    _thread: CaptureThread,
     return_position: std::sync::Mutex<Option<(f64, f64)>>,
 }
 impl CaptureSession {
+    pub fn shutdown(&mut self) -> Result<()> {
+        self.restore();
+        #[cfg(any(windows, target_os = "macos"))]
+        anyhow::ensure!(
+            self._thread.shutdown(std::time::Duration::from_millis(500)),
+            "native capture shutdown timed out or panicked"
+        );
+        Ok(())
+    }
     pub fn begin(&self, return_x: f64, return_y: f64) -> Result<bool> {
         if !self.gate.try_activate() {
             return Ok(false);
@@ -143,9 +160,10 @@ pub fn capture(tx: mpsc::Sender<Captured>) -> Result<CaptureSession> {
     let gate = CaptureGate::default();
     #[cfg(any(windows, target_os = "macos"))]
     {
-        native::capture(tx, gate.clone())?;
+        let thread = native::capture(tx, gate.clone())?;
         Ok(CaptureSession {
             gate,
+            _thread: thread,
             return_position: std::sync::Mutex::new(None),
         })
     }

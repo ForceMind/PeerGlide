@@ -9,9 +9,11 @@ use windows_sys::Win32::{
 const TAG: usize = 0x50474c44;
 thread_local! { static WHEEL:RefCell<[i32; 2]>=const {RefCell::new([0; 2])}; }
 thread_local! { static STATE:RefCell<Option<HookState>>=const {RefCell::new(None)}; }
-pub fn capture(tx: mpsc::Sender<Captured>, gate: CaptureGate) -> Result<()> {
+pub fn capture(tx: mpsc::Sender<Captured>, gate: CaptureGate) -> Result<CaptureThread> {
+    let reservation = capture_thread::Reservation::acquire()?;
     let (ready, rx) = std::sync::mpsc::sync_channel(1);
-    std::thread::spawn(move || unsafe {
+    let thread = CaptureThread::spawn(move |stop| unsafe {
+        let _reservation = reservation;
         SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let state = HookState {
             tx,
@@ -36,9 +38,23 @@ pub fn capture(tx: mpsc::Sender<Captured>, gate: CaptureGate) -> Result<()> {
         }
         let _ = ready.send(true);
         let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        while !stop.load(Ordering::Acquire) {
+            if PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
+                if msg.message == WM_QUIT {
+                    break;
+                }
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            } else {
+                // Input wakes immediately; the timeout bounds cooperative shutdown.
+                MsgWaitForMultipleObjectsEx(
+                    0,
+                    std::ptr::null(),
+                    50,
+                    QS_ALLINPUT,
+                    MWMO_INPUTAVAILABLE,
+                );
+            }
         }
         STATE.with_borrow(|s| {
             if let Some(s) = s {
@@ -52,7 +68,7 @@ pub fn capture(tx: mpsc::Sender<Captured>, gate: CaptureGate) -> Result<()> {
         rx.recv_timeout(std::time::Duration::from_secs(3))?,
         "unable to install input hooks"
     );
-    Ok(())
+    Ok(thread)
 }
 unsafe extern "system" fn key_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     if code >= 0 {
