@@ -67,3 +67,24 @@ Local workspace tests (22 Linux tests), strict clippy and fmt passed. Real OS
 input acceptance remains pending. Updating one peer alone is unsupported; v3 ALPN
 intentionally rejects v2. Safety timeout and local preemption are still allowed
 to interrupt input without draining it.
+
+
+## C01: fixture isolation investigation (2026-11-02)
+
+Historical main run 41226383167 failed only the macOS GUI render test with an
+uncontextualized os error 2. Runs 41321441089 and 41321555098 passed without a
+runtime fix; neither proves the race cause. PR #14's initial run 41324173162
+failed rustfmt on all platforms, before any test executed.
+
+Follow-up reserves each fixture with exclusive create_dir, adds per-process
+sequence names, RAII fallback cleanup, explicit contextual cleanup errors and a
+32-thread fixture ownership/cleanup regression. macOS CI executes the render
+test alone, then all GUI tests 20 times with eight test threads, recording OS and
+compiler. No test is skipped and failed tests are not retried to mask a failure.
+Only fixture-name reservation retries AlreadyExists, never test execution.
+
+The historical timestamp collision remains a hypothesis: the original log did
+not identify the failed I/O operation or preserve allocated paths. A green final
+matrix and stress run demonstrate the new fixture behavior, not proof of the
+original failure's root cause. Issue #10 remains open pending that evidence.
+Physical Windows/macOS input acceptance #3 is unaffected.

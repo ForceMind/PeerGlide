@@ -663,25 +663,86 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn dir() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "peerglide-ui-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+    pub(super) struct Fixture {
+        pub(super) path: PathBuf,
+        live: bool,
+    }
+    impl Fixture {
+        pub(super) fn new() -> Result<Self> {
+            static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            for _ in 0..100 {
+                let path = std::env::temp_dir().join(format!(
+                    "peerglide-ui-{}-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_nanos(),
+                    NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
+                match std::fs::create_dir(&path) {
+                    Ok(()) => return Ok(Self { path, live: true }),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => {
+                        return Err(e)
+                            .with_context(|| format!("create GUI fixture {}", path.display()))
+                    }
+                }
+            }
+            anyhow::bail!("unable to reserve a unique GUI test directory")
+        }
+        pub(super) fn close(mut self) -> Result<()> {
+            std::fs::remove_dir_all(&self.path)
+                .with_context(|| format!("cleanup GUI fixture {}", self.path.display()))?;
+            self.live = false;
+            Ok(())
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if self.live {
+                if let Err(e) = std::fs::remove_dir_all(&self.path) {
+                    eprintln!("GUI fixture cleanup failed at {}: {e}", self.path.display());
+                }
+            }
+        }
+    }
+    #[test]
+    fn parallel_fixtures_have_exclusive_ownership_and_cleanup() -> Result<()> {
+        let fixtures: Vec<_> = (0..32).map(|_| std::thread::spawn(Fixture::new)).collect();
+        let fixtures: Vec<_> = fixtures
+            .into_iter()
+            .map(|t| t.join().expect("fixture thread panicked"))
+            .collect::<Result<_>>()?;
+        let paths: std::collections::BTreeSet<_> =
+            fixtures.iter().map(|f| f.path.clone()).collect();
+        assert_eq!(paths.len(), 32);
+        for fixture in &fixtures {
+            assert!(fixture.path.is_dir());
+        }
+        for fixture in fixtures {
+            fixture.close()?;
+        }
+        for path in paths {
+            assert!(!path.exists());
+        }
+        let path = {
+            let fixture = Fixture::new()?;
+            fixture.path.clone()
+        };
+        assert!(!path.exists(), "RAII cleanup on early return");
+        Ok(())
     }
     #[test]
     fn enrollment_requires_confirmation_and_detects_changed_certificate() -> Result<()> {
-        let dir = dir();
+        let fixture = Fixture::new()?;
+        let dir = fixture.path.clone();
         {
             let mut app = App::load(dir.clone());
             let local = Identity::create(&app.identity_dir())?;
             let peer = Identity::generate()?;
             let candidate = dir.join("candidate.der");
-            std::fs::write(&candidate, &peer.certificate)?;
+            std::fs::write(&candidate, &peer.certificate)
+                .context("write peer candidate fixture")?;
             app.import_path = candidate.display().to_string();
             assert!(app.enroll().is_err());
             app.compared = true;
@@ -691,7 +752,8 @@ mod tests {
             let loaded = App::load(dir.clone());
             assert_eq!(loaded.config.fingerprint, Some(peer.fingerprint()));
             drop(loaded);
-            std::fs::write(dir.join("trusted-peer.crt.der"), &local.certificate)?;
+            std::fs::write(dir.join("trusted-peer.crt.der"), &local.certificate)
+                .context("replace pinned certificate fixture")?;
             assert!(app
                 .start(false)
                 .unwrap_err()
@@ -705,12 +767,13 @@ mod tests {
             app.compared = true;
             assert!(app.enroll().is_err());
         }
-        std::fs::remove_dir_all(dir)?;
+        fixture.close()?;
         Ok(())
     }
     #[test]
     fn all_configuration_pages_render_in_both_themes_without_a_display() -> Result<()> {
-        let dir = dir();
+        let fixture = Fixture::new()?;
+        let dir = fixture.path.clone();
         {
             let mut app = App::load(dir.clone());
             let ctx = egui::Context::default();
@@ -740,7 +803,7 @@ mod tests {
                 }
             }
         }
-        std::fs::remove_dir_all(dir)?;
+        fixture.close()?;
         Ok(())
     }
 }
@@ -750,7 +813,8 @@ mod lifecycle_tests {
     use super::*;
     #[test]
     fn delayed_worker_output_cannot_report_a_dead_process_as_connected() -> Result<()> {
-        let dir = std::env::temp_dir().join(format!("peerglide-ui-exit-{}", std::process::id()));
+        let fixture = super::tests::Fixture::new()?;
+        let dir = fixture.path.clone();
         {
             let mut app = App::load(dir.clone());
             let (tx, rx) = mpsc::channel();
@@ -760,7 +824,7 @@ mod lifecycle_tests {
             assert!(!app.connected);
             assert_eq!(app.status, "Offline");
         }
-        std::fs::remove_dir_all(dir)?;
+        fixture.close()?;
         Ok(())
     }
 }
