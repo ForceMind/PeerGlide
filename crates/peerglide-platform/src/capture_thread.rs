@@ -52,11 +52,21 @@ impl CaptureThread {
         if self.thread.is_none() {
             return true;
         }
+        let started = std::time::Instant::now();
         if matches!(
             self.done.recv_timeout(timeout),
             Err(mpsc::RecvTimeoutError::Timeout)
         ) {
             return false;
+        }
+        // Task completion precedes thread-local destructors. Join only after
+        // the OS thread is finished, keeping TLS cleanup inside the same budget.
+        while self.thread.as_ref().is_some_and(|t| !t.is_finished()) {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return false;
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(1)));
         }
         self.thread.take().is_none_or(|t| t.join().is_ok())
     }
@@ -95,6 +105,30 @@ mod tests {
     #[test]
     fn partial_initialization_exit_is_joined() {
         let mut t = CaptureThread::spawn(|_| ());
+        assert!(t.shutdown(Duration::from_secs(1)));
+    }
+    #[test]
+    fn completion_notice_does_not_make_blocked_thread_local_cleanup_joinable() {
+        struct OnExit(mpsc::SyncSender<()>, mpsc::Receiver<()>);
+        impl Drop for OnExit {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+                let _ = self.1.recv();
+            }
+        }
+        thread_local! { static EXIT: std::cell::RefCell<Option<OnExit>> = const { std::cell::RefCell::new(None) }; }
+        let (started, waiting) = mpsc::sync_channel(1);
+        let (release, blocked) = mpsc::sync_channel(1);
+        let mut t = CaptureThread::spawn(move |_| EXIT.set(Some(OnExit(started, blocked))));
+        waiting.recv_timeout(Duration::from_secs(1)).unwrap();
+        // Rescue prevents a regression from hanging the test process forever.
+        let rescue = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            let _ = release.send(());
+        });
+        let stopped = t.shutdown(Duration::ZERO);
+        rescue.join().unwrap();
+        assert!(!stopped, "a completed task is not a completed OS thread");
         assert!(t.shutdown(Duration::from_secs(1)));
     }
     #[test]

@@ -127,3 +127,11 @@ expired lease, pressed modifiers/buttons still produce balanced cleanup, repeate
 cleanup is empty, and delayed old-lease reliable/datagram events cannot contaminate
 a new lease. Final-pointer delivery and full fault/session regression expansion
 remain pending; these tests do not claim those capabilities or physical acceptance.
+
+
+C03 bounded-join follow-up: a completion notification can precede blocked TLS
+cleanup. The new regression failed before the fix (shutdown returned success
+only after rescue released the destructor despite a zero budget). shutdown now
+checks actual thread completion within its remaining budget before join. Native
+loop reservation covers hook ownership through native cleanup; TLS completion is
+separately budgeted. This does not establish real OS handle-count acceptance.

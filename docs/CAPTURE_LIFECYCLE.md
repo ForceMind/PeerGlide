@@ -12,7 +12,7 @@ Windows dispatches input immediately via PeekMessage and waits for input with a
 slices, disables the tap and releases its source/port before completion. Native
 initialization failure or readiness timeout drops the thread owner and requests
 stop too. A blocked OS call cannot be force-killed safely: the join may time out,
-but the gate is disabled and new capture remains refused until that thread exits.
+but the gate is disabled and new capture remains refused until native loop cleanup finishes.
 
 Pure lifecycle tests cover 20 start/stop/join rounds, repeated shutdown, early
 initialization exit and a deliberately blocked backend's timeout/recovery.
@@ -20,3 +20,10 @@ They are not native hook/handle-count measurements. Real permission-granted OS
 start/stop cycles, resource counts, permission revocation and session reconnection
 remain pending under C03/#3. For the subsequent C04 implementation and remaining native UX acceptance, see
 [WORKER_IPC.md](WORKER_IPC.md).
+
+
+Task completion is not treated as thread completion: a thread-local destructor
+may still block after the completion notification. shutdown waits for
+JoinHandle::is_finished within the same budget before joining. A regression uses
+a deliberately blocked thread-local destructor and an independent rescue to
+prove the previous implementation failed this boundary without hanging CI.
