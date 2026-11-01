@@ -135,3 +135,13 @@ only after rescue released the destructor despite a zero budget). The first is_f
 41327242373; it was not merged. A dedicated reaper now owns join and the capture
 reservation through all thread-local destruction. The caller waits only on a
 bounded acknowledgement, so timeout never enters join on the caller thread. This does not establish real OS handle-count acceptance.
+
+
+## C02 physical scan / keypad slice
+
+Adds physical Windows scan capture/injection with E0 flags, distinct keypad Enter
+and navigation keys, startup VK sample replacement, and macOS keypad/ISO mappings.
+Local workspace tests/strict clippy plus native-target platform clippy passed.
+Native CI and Apple SDK constant verification are required on the final candidate.
+Real keypad, NumLock/layout/IME and mixed-keyboard behavior remain #3 acceptance;
+C02 is still implementing, with media/full OEM/capability work pending.

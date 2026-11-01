@@ -80,10 +80,13 @@ unsafe extern "system" fn key_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
                 s.as_mut().is_some_and(|s| {
                     let _callback = s.gate.begin_event();
                     let down = w as u32 == WM_KEYDOWN || w as u32 == WM_SYSKEYDOWN;
-                    match from_vk(e.vkCode as u16) {
-                        Some(usage) => s.key(usage, down),
-                        None => s.unsupported_key(e.vkCode as u16, down),
-                    }
+                    physical_key(
+                        s,
+                        e.vkCode as u16,
+                        e.scanCode as u16,
+                        e.flags & LLKHF_EXTENDED != 0,
+                        down,
+                    )
                 })
             });
             if block {
@@ -167,15 +170,8 @@ pub fn inject(event: Input) -> Result<()> {
         let mut input: INPUT = std::mem::zeroed();
         match event {
             Input::Key { usage, down } => {
-                let vk = to_vk(usage).ok_or_else(|| anyhow::anyhow!("unsupported HID key"))?;
                 input.r#type = INPUT_KEYBOARD;
-                input.Anonymous.ki = KEYBDINPUT {
-                    wVk: vk,
-                    wScan: 0,
-                    dwFlags: if down { 0 } else { KEYEVENTF_KEYUP },
-                    time: 0,
-                    dwExtraInfo: TAG,
-                };
+                input.Anonymous.ki = key_input(usage, down)?;
             }
             Input::Button { button, down } => {
                 input.r#type = INPUT_MOUSE;
@@ -245,52 +241,146 @@ pub fn pointer(x: f64, y: f64) -> Result<()> {
         Ok(())
     }
 }
-fn to_vk(u: u16) -> Option<u16> {
-    Some(match u {
-        4..=29 => u - 4 + 0x41,
-        30..=38 => u - 30 + 0x31,
-        39 => 0x30,
-        40 => 0x0d,
-        41 => 0x1b,
-        42 => 8,
-        43 => 9,
-        44 => 0x20,
-        45 => 0xbd,
-        46 => 0xbb,
-        47 => 0xdb,
-        48 => 0xdd,
-        49 => 0xdc,
-        51 => 0xba,
-        52 => 0xde,
-        53 => 0xc0,
-        54 => 0xbc,
-        55 => 0xbe,
-        56 => 0xbf,
-        57 => 0x14,
-        58..=69 => u - 58 + 0x70,
-        73 => 0x2d,
-        74 => 0x24,
-        75 => 0x21,
-        76 => 0x2e,
-        77 => 0x23,
-        78 => 0x22,
-        79 => 0x27,
-        80 => 0x25,
-        81 => 0x28,
-        82 => 0x26,
-        0xe0 => 0xa2,
-        0xe1 => 0xa0,
-        0xe2 => 0xa4,
-        0xe3 => 0x5b,
-        0xe4 => 0xa3,
-        0xe5 => 0xa1,
-        0xe6 => 0xa5,
-        0xe7 => 0x5c,
-        _ => return None,
-    })
+// Set-1 physical scan positions; E0 distinguishes keypad/navigation and modifiers.
+const KEYS: &[(u16, u16, bool)] = &[
+    (0x04, 0x1e, false),
+    (0x05, 0x30, false),
+    (0x06, 0x2e, false),
+    (0x07, 0x20, false),
+    (0x08, 0x12, false),
+    (0x09, 0x21, false),
+    (0x0a, 0x22, false),
+    (0x0b, 0x23, false),
+    (0x0c, 0x17, false),
+    (0x0d, 0x24, false),
+    (0x0e, 0x25, false),
+    (0x0f, 0x26, false),
+    (0x10, 0x32, false),
+    (0x11, 0x31, false),
+    (0x12, 0x18, false),
+    (0x13, 0x19, false),
+    (0x14, 0x10, false),
+    (0x15, 0x13, false),
+    (0x16, 0x1f, false),
+    (0x17, 0x14, false),
+    (0x18, 0x16, false),
+    (0x19, 0x2f, false),
+    (0x1a, 0x11, false),
+    (0x1b, 0x2d, false),
+    (0x1c, 0x15, false),
+    (0x1d, 0x2c, false),
+    (0x1e, 0x02, false),
+    (0x1f, 0x03, false),
+    (0x20, 0x04, false),
+    (0x21, 0x05, false),
+    (0x22, 0x06, false),
+    (0x23, 0x07, false),
+    (0x24, 0x08, false),
+    (0x25, 0x09, false),
+    (0x26, 0x0a, false),
+    (0x27, 0x0b, false),
+    (0x28, 0x1c, false),
+    (0x29, 0x01, false),
+    (0x2a, 0x0e, false),
+    (0x2b, 0x0f, false),
+    (0x2c, 0x39, false),
+    (0x2d, 0x0c, false),
+    (0x2e, 0x0d, false),
+    (0x2f, 0x1a, false),
+    (0x30, 0x1b, false),
+    (0x31, 0x2b, false),
+    (0x33, 0x27, false),
+    (0x34, 0x28, false),
+    (0x35, 0x29, false),
+    (0x36, 0x33, false),
+    (0x37, 0x34, false),
+    (0x38, 0x35, false),
+    (0x39, 0x3a, false),
+    (0x3a, 0x3b, false),
+    (0x3b, 0x3c, false),
+    (0x3c, 0x3d, false),
+    (0x3d, 0x3e, false),
+    (0x3e, 0x3f, false),
+    (0x3f, 0x40, false),
+    (0x40, 0x41, false),
+    (0x41, 0x42, false),
+    (0x42, 0x43, false),
+    (0x43, 0x44, false),
+    (0x44, 0x57, false),
+    (0x45, 0x58, false),
+    (0x49, 0x52, true),
+    (0x4a, 0x47, true),
+    (0x4b, 0x49, true),
+    (0x4c, 0x53, true),
+    (0x4d, 0x4f, true),
+    (0x4e, 0x51, true),
+    (0x4f, 0x4d, true),
+    (0x50, 0x4b, true),
+    (0x51, 0x50, true),
+    (0x52, 0x48, true),
+    (0x53, 0x45, true),
+    (0x54, 0x35, true),
+    (0x58, 0x1c, true),
+    (0x55, 0x37, false),
+    (0x56, 0x4a, false),
+    (0x57, 0x4e, false),
+    (0x59, 0x4f, false),
+    (0x5a, 0x50, false),
+    (0x5b, 0x51, false),
+    (0x5c, 0x4b, false),
+    (0x5d, 0x4c, false),
+    (0x5e, 0x4d, false),
+    (0x5f, 0x47, false),
+    (0x60, 0x48, false),
+    (0x61, 0x49, false),
+    (0x62, 0x52, false),
+    (0x63, 0x53, false),
+    (0x64, 0x56, false),
+    (0xe0, 0x1d, false),
+    (0xe1, 0x2a, false),
+    (0xe2, 0x38, false),
+    (0xe5, 0x36, false),
+    (0xe3, 0x5b, true),
+    (0xe4, 0x1d, true),
+    (0xe6, 0x38, true),
+    (0xe7, 0x5c, true),
+];
+fn to_scan(usage: u16) -> Option<(u16, bool)> {
+    KEYS.iter().find(|k| k.0 == usage).map(|k| (k.1, k.2))
 }
-fn from_vk(v: u16) -> Option<u16> {
-    (4..=0xe7).find(|u| to_vk(*u) == Some(v))
+fn from_scan(scan: u16, extended: bool) -> Option<u16> {
+    KEYS.iter()
+        .find(|k| k.1 == scan && k.2 == extended)
+        .map(|k| k.0)
+}
+const STARTUP_VK: u16 = 0x4000;
+fn physical_key(s: &mut HookState, vk: u16, scan: u16, extended: bool, down: bool) -> bool {
+    // Startup state is sampled as VKs; the first physical callback replaces that
+    // sample with its unambiguous scan identity (including keypad Enter).
+    s.keys.remove(&(STARTUP_VK | vk));
+    let usage = if vk == VK_PAUSE || vk == VK_SNAPSHOT {
+        None
+    } else if vk == VK_NUMLOCK {
+        Some(0x53)
+    } else {
+        from_scan(scan, extended)
+    };
+    match usage {
+        Some(usage) => s.key(usage, down),
+        None => s.unsupported_key(vk, down),
+    }
+}
+fn key_input(usage: u16, down: bool) -> Result<KEYBDINPUT> {
+    let (scan, extended) = to_scan(usage).ok_or_else(|| anyhow::anyhow!("unsupported HID key"))?;
+    Ok(KEYBDINPUT {
+        wVk: 0,
+        wScan: scan,
+        dwFlags: KEYEVENTF_SCANCODE
+            | if extended { KEYEVENTF_EXTENDEDKEY } else { 0 }
+            | if down { 0 } else { KEYEVENTF_KEYUP },
+        time: 0,
+        dwExtraInfo: TAG,
+    })
 }
 
 unsafe fn initial_keys() -> std::collections::BTreeSet<u16> {
@@ -299,7 +389,7 @@ unsafe fn initial_keys() -> std::collections::BTreeSet<u16> {
     (7u16..=255)
         .filter(|v| ![0x10, 0x11, 0x12].contains(v))
         .filter(|v| GetAsyncKeyState(i32::from(*v)) < 0)
-        .map(|v| from_vk(v).unwrap_or(0x8000 | v))
+        .map(|v| STARTUP_VK | v)
         .collect()
 }
 unsafe fn initial_buttons() -> std::collections::BTreeSet<u8> {
@@ -327,10 +417,47 @@ mod tests {
     }
     #[test]
     fn key_positions_roundtrip() {
-        for u in 4..=0xe7 {
-            if let Some(v) = to_vk(u) {
-                assert_eq!(from_vk(v), Some(u));
-            }
+        for &(usage, scan, extended) in KEYS {
+            assert_eq!(to_scan(usage), Some((scan, extended)));
+            assert_eq!(from_scan(scan, extended), Some(usage));
+            let down = key_input(usage, true).unwrap();
+            let up = key_input(usage, false).unwrap();
+            assert_eq!(down.wVk, 0);
+            assert_eq!(down.wScan, scan);
+            assert_eq!(up.dwFlags, down.dwFlags | KEYEVENTF_KEYUP);
+            assert_eq!(down.dwFlags & KEYEVENTF_SCANCODE, KEYEVENTF_SCANCODE);
+            assert_eq!(down.dwFlags & KEYEVENTF_EXTENDEDKEY != 0, extended);
         }
+    }
+    #[test]
+    fn keypad_navigation_and_modifier_sides_stay_distinct() {
+        assert_eq!(from_scan(0x1c, false), Some(0x28));
+        assert_eq!(from_scan(0x1c, true), Some(0x58));
+        assert_eq!(from_scan(0x4f, false), Some(0x59));
+        assert_eq!(from_scan(0x4f, true), Some(0x4d));
+        assert_eq!(from_scan(0x1d, false), Some(0xe0));
+        assert_eq!(from_scan(0x1d, true), Some(0xe4));
+    }
+    #[test]
+    fn keypad_enter_release_clears_ambiguous_startup_sample() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut s = HookState {
+            tx,
+            gate: CaptureGate::default(),
+            keys: [STARTUP_VK | VK_RETURN].into(),
+            buttons: Default::default(),
+            toggle_armed: false,
+        };
+        s.update_held();
+        assert!(!s.gate.try_activate());
+        assert!(!physical_key(&mut s, VK_RETURN, 0x1c, true, false));
+        assert!(s.gate.try_activate());
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Captured::Input(Input::Key {
+                usage: 0x58,
+                down: false
+            })
+        ));
     }
 }
