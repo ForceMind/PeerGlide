@@ -15,7 +15,6 @@
 Use incremental branches and PRs, fmt, clippy with denied warnings, tests and
 native matrix builds. Do not force updates or change repository visibility.
 
-
 ## Input correctness gate (before M2 expansion)
 
 1. Retain/retry failed native releases and fail the session visibly; add injected
@@ -30,3 +29,38 @@ native matrix builds. Do not force updates or change repository visibility.
    immediate disconnect-and-revoke.
 7. Run physical Windows/macOS acceptance matrix #3. No date or completion claim
    substitutes for recorded real desktop results.
+
+## 2026-11-01 additive execution baseline
+
+See [PRODUCT_EVOLUTION.zh-CN.md](PRODUCT_EVOLUTION.zh-CN.md) for task IDs,
+priorities, dependencies, test matrices, release slices and continuing-work rules.
+The earlier steps and input correctness gate above are retained, not replaced.
+
+Immediate work:
+
+1. **C01 / #10:** restore macOS CI at baseline `5617438`. Run `41226383167`
+   fails the GUI headless-page test with filesystem error 2; Windows/Linux pass.
+   Diagnose fixture isolation and cleanup before assigning a root cause.
+2. **C02–C05 / #3 #5:** unknown-key policy, capture-thread ownership and teardown,
+   structured worker events/revocation, and ordered-return/recovery regressions.
+3. **C06 / #3:** authorized physical acceptance with exact OS/hardware evidence.
+   If hardware is unavailable, record blocked and continue only independent work.
+4. **P01–P04 / #4, U01–U02 / #5:** trust/grants, discovery, authenticated pairing,
+   fresh-lease reconnect, desktop lifecycle and topology slices.
+5. **G01–G05 / #11:** optional local-only gestures and typed actions on the shared
+   input runtime; no script engine and no remote gesture interception in G1.
+6. **D01–D04 / #6, R01–R03 / #12:** separately permissioned data collaboration and
+   target-bound semantic actions. Native OS file drag remains its own gate.
+7. **S01–S03 / #7:** security, packaging/signing and measured release acceptance
+   throughout; optional expansion must not block an accepted scoped core preview.
+
+Source pointers: `crates/peerglide-platform/src/lib.rs`, native adapters,
+`apps/peerglide-desktop/src/session.rs`, `apps/peerglide-gui/src/main.rs`,
+`peerglide-core`, `peerglide-protocol` and `peerglide-transport`.
+New `peerglide-gestures`/`peerglide-actions` crates are planned, not present.
+
+Each development PR states task IDs, changed behavior, protocol impact,
+regression evidence, untested platforms and rollback. Keep physical acceptance
+separate from CI. Do not log key/clipboard contents, introduce a second global
+hook stack, silently enable imported actions, or use a docs-only change to claim
+that a runtime failure is fixed. See [ADR-0002](ADR/0002-unified-input-actions.md).
