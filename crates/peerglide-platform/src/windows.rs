@@ -12,58 +12,60 @@ thread_local! { static STATE:RefCell<Option<HookState>>=const {RefCell::new(None
 pub fn capture(tx: mpsc::Sender<Captured>, gate: CaptureGate) -> Result<CaptureThread> {
     let reservation = capture_thread::Reservation::acquire()?;
     let (ready, rx) = std::sync::mpsc::sync_channel(1);
-    let thread = CaptureThread::spawn(move |stop| unsafe {
-        let _reservation = reservation;
-        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let state = HookState {
-            tx,
-            gate,
-            keys: initial_keys(),
-            buttons: initial_buttons(),
-            toggle_armed: false,
-        };
-        state.update_held();
-        STATE.set(Some(state));
-        let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), null_mut(), 0);
-        let keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), null_mut(), 0);
-        if mouse.is_null() || keyboard.is_null() {
-            if !mouse.is_null() {
-                UnhookWindowsHookEx(mouse);
-            }
-            if !keyboard.is_null() {
-                UnhookWindowsHookEx(keyboard);
-            }
-            let _ = ready.send(false);
-            return;
-        }
-        let _ = ready.send(true);
-        let mut msg: MSG = std::mem::zeroed();
-        while !stop.load(Ordering::Acquire) {
-            if PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
-                if msg.message == WM_QUIT {
-                    break;
+    let thread = CaptureThread::spawn_owned(
+        move |stop| unsafe {
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let state = HookState {
+                tx,
+                gate,
+                keys: initial_keys(),
+                buttons: initial_buttons(),
+                toggle_armed: false,
+            };
+            state.update_held();
+            STATE.set(Some(state));
+            let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), null_mut(), 0);
+            let keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), null_mut(), 0);
+            if mouse.is_null() || keyboard.is_null() {
+                if !mouse.is_null() {
+                    UnhookWindowsHookEx(mouse);
                 }
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            } else {
-                // Input wakes immediately; the timeout bounds cooperative shutdown.
-                MsgWaitForMultipleObjectsEx(
-                    0,
-                    std::ptr::null(),
-                    50,
-                    QS_ALLINPUT,
-                    MWMO_INPUTAVAILABLE,
-                );
+                if !keyboard.is_null() {
+                    UnhookWindowsHookEx(keyboard);
+                }
+                let _ = ready.send(false);
+                return;
             }
-        }
-        STATE.with_borrow(|s| {
-            if let Some(s) = s {
-                s.gate.disable();
+            let _ = ready.send(true);
+            let mut msg: MSG = std::mem::zeroed();
+            while !stop.load(Ordering::Acquire) {
+                if PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    if msg.message == WM_QUIT {
+                        break;
+                    }
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                } else {
+                    // Input wakes immediately; the timeout bounds cooperative shutdown.
+                    MsgWaitForMultipleObjectsEx(
+                        0,
+                        std::ptr::null(),
+                        50,
+                        QS_ALLINPUT,
+                        MWMO_INPUTAVAILABLE,
+                    );
+                }
             }
-        });
-        UnhookWindowsHookEx(mouse);
-        UnhookWindowsHookEx(keyboard);
-    });
+            STATE.with_borrow(|s| {
+                if let Some(s) = s {
+                    s.gate.disable();
+                }
+            });
+            UnhookWindowsHookEx(mouse);
+            UnhookWindowsHookEx(keyboard);
+        },
+        reservation,
+    );
     ensure!(
         rx.recv_timeout(std::time::Duration::from_secs(3))?,
         "unable to install input hooks"

@@ -64,3 +64,19 @@ regression evidence, untested platforms and rollback. Keep physical acceptance
 separate from CI. Do not log key/clipboard contents, introduce a second global
 hook stack, silently enable imported actions, or use a docs-only change to claim
 that a runtime failure is fixed. See [ADR-0002](ADR/0002-unified-input-actions.md).
+
+
+## Implementation checkpoint: 2026-11-02
+
+This table records engineering status; physical acceptance remains #3. Latest
+runtime evidence and historical failures are in VALIDATION.md.
+
+| Task | Status | Evidence / remaining gate |
+|---|---|---|
+| C01 | implementing | #14 fixture isolation + macOS stress passed; historical root cause #10 still open |
+| C02 | implementing | #15 unsupported-key recovery; extended maps/capabilities pending |
+| C03 | implemented-unverified | #16 stop/join/reservation CI passed; native resource counts/revocation pending |
+| C04 | implemented-unverified | #17 structured events/revoke CI passed; native interaction pending |
+| C05 | implementing | v3 ordering + expiry boundary tests; final-pointer/fault expansion pending |
+| C06 | blocked | No authorized physical Windows/macOS desktop pair in this environment |
+| G01/G02 | planned | Pure action/gesture logic may follow core correctness work; no gesture hook enabled |
