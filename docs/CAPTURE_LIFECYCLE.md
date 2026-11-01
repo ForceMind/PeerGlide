@@ -18,4 +18,5 @@ Pure lifecycle tests cover 20 start/stop/join rounds, repeated shutdown, early
 initialization exit and a deliberately blocked backend's timeout/recovery.
 They are not native hook/handle-count measurements. Real permission-granted OS
 start/stop cycles, resource counts, permission revocation and session reconnection
-remain pending under C03/#3. C04 structured state IPC has not been implemented.
+remain pending under C03/#3. For the subsequent C04 implementation and remaining native UX acceptance, see
+[WORKER_IPC.md](WORKER_IPC.md).

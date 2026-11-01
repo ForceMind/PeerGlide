@@ -111,3 +111,19 @@ native platforms additionally test exclusive reservations. Real native thread an
 handle counts/repeated permission-granted capture remain unverified. C03 remains
 implemented-unverified for those gates. See CAPTURE_LIFECYCLE.md. C04 structured
 worker events and C05 final-pointer/recovery regression expansion remain pending.
+
+
+## Subsequent C03/C04 validation and C05 boundary regressions
+
+C03 candidate `fd1948eb1c8c9cc2736b9f1c87108269e13f7fd4` passed full native
+matrix 41325579471 and merged via #16. C04 candidate
+`193c067aef49ef7f36dc4376771b99993784f4dd` passed native matrix 41325829626 and
+merged via #17. Earlier statements that C04 was pending describe the C03
+checkpoint, not current implementation. The integrated main dbef1d3eecb9d4a1cd21771650cdf8172766f956
+passed local 29-test workspace/clippy and managed two-process smoke.
+
+C05 now adds exact-deadline tests: heartbeat and cursor anchors cannot revive an
+expired lease, pressed modifiers/buttons still produce balanced cleanup, repeated
+cleanup is empty, and delayed old-lease reliable/datagram events cannot contaminate
+a new lease. Final-pointer delivery and full fault/session regression expansion
+remain pending; these tests do not claim those capabilities or physical acceptance.

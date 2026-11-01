@@ -342,3 +342,86 @@ mod recovery_tests {
         assert_eq!(buttons, 1);
     }
 }
+
+#[cfg(test)]
+mod expiry_boundary_tests {
+    use super::*;
+    #[test]
+    fn deadline_is_exclusive_and_late_input_cannot_pollute_next_lease() {
+        let mut receiver = Receiver::default();
+        assert!(receiver.acquire(1, 0, true));
+        let key = Input::Key {
+            usage: 0xe0,
+            down: true,
+        };
+        let button = Input::Button {
+            button: 1,
+            down: true,
+        };
+        assert!(receiver.input(1, key, 1499));
+        assert!(receiver.input(1, button, 1499));
+        // Input does not silently extend the lease. A heartbeat at the exact
+        // deadline cannot resurrect it, even if cleanup hasn't run yet.
+        assert!(!receiver.heartbeat(1, 1500));
+        assert!(!receiver.input(
+            1,
+            Input::Key {
+                usage: 0xe0,
+                down: false
+            },
+            1500
+        ));
+        assert!(receiver.expired(1500));
+        let releases = receiver.release();
+        assert!(releases.contains(&Input::Key {
+            usage: 0xe0,
+            down: false
+        }));
+        assert!(releases.contains(&Input::Button {
+            button: 1,
+            down: false
+        }));
+        assert_eq!(releases.len(), 2);
+        assert!(receiver.release().is_empty());
+        assert!(receiver.acquire(2, 1501, true));
+        assert!(!receiver.input(1, key, 1502));
+        assert!(!receiver.anchor(
+            Motion {
+                lease: 1,
+                sequence: 999,
+                x: 0.0,
+                y: 0.0
+            },
+            1502
+        ));
+        assert!(!receiver.motion(
+            Motion {
+                lease: 1,
+                sequence: 1000,
+                x: 0.0,
+                y: 0.0
+            },
+            1502
+        ));
+        assert!(
+            receiver.release().is_empty(),
+            "old input must not create releases in the new lease"
+        );
+    }
+    #[test]
+    fn expired_reliable_cursor_anchor_cannot_extend_control() {
+        let mut receiver = Receiver::default();
+        assert!(receiver.acquire(1, 0, true));
+        assert!(receiver.heartbeat(1, 1000));
+        let cursor = Motion {
+            lease: 1,
+            sequence: 1,
+            x: 0.25,
+            y: 0.75,
+        };
+        assert!(receiver.anchor(cursor, 2499));
+        assert!(!receiver.anchor(cursor, 2500));
+        assert!(receiver.expired(2500));
+        assert!(!receiver.heartbeat(1, 2500));
+    }
+}
