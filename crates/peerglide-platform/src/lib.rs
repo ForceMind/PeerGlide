@@ -35,6 +35,7 @@ pub enum Captured {
     },
     Input(Input),
     Emergency,
+    UnsupportedKey,
     Toggle,
 }
 #[derive(Default)]
@@ -204,6 +205,21 @@ impl HookState {
             self.gate.disable();
         }
     }
+    // Unsupported physical keys remain local and cancel control. Track their
+    // held state in a disjoint namespace so they cannot straddle acquisition.
+    fn unsupported_key(&mut self, code: u16, down: bool) -> bool {
+        let token = 0x8000 | (code & 0x7fff);
+        if down {
+            self.keys.insert(token);
+        } else {
+            self.keys.remove(&token);
+        }
+        self.update_held();
+        self.gate.disable();
+        self.toggle_armed = false;
+        self.emit(Captured::UnsupportedKey);
+        false
+    }
     fn key(&mut self, usage: u16, down: bool) -> bool {
         if down {
             self.keys.insert(usage);
@@ -288,6 +304,31 @@ mod hook_tests {
             }
         }
         assert_eq!(toggles, 1);
+    }
+    #[test]
+    fn unsupported_key_cancels_control_and_blocks_acquisition_until_release() {
+        let (mut s, mut rx) = state(20);
+        assert!(s.gate.try_activate());
+        assert!(!s.unsupported_key(0x100, true));
+        assert!(!s.gate.active());
+        assert!(!s.gate.try_activate());
+        assert!(!s.unsupported_key(0x100, true)); // autorepeat is not a second hold
+        assert!(!s.unsupported_key(0x100, false));
+        assert!(s.gate.try_activate());
+        while let Ok(event) = rx.try_recv() {
+            assert!(matches!(event, Captured::UnsupportedKey));
+        }
+    }
+    #[test]
+    fn unsupported_key_cancels_an_armed_switch_and_fails_open_when_queue_full() {
+        let (mut s, _rx) = state(1);
+        s.toggle_armed = true;
+        assert!(s.gate.try_activate());
+        s.unsupported_key(0x100, true);
+        s.unsupported_key(0x100, false);
+        assert!(!s.toggle_armed);
+        assert!(!s.gate.active());
+        assert!(s.gate.idle());
     }
     #[test]
     fn queue_overflow_disables_capture() {
