@@ -85,6 +85,14 @@ fn transport() -> Arc<quinn::TransportConfig> {
     Arc::new(t)
 }
 pub fn endpoint(addr: SocketAddr, identity: &Identity, peer: &[u8]) -> Result<Endpoint> {
+    endpoint_alpn(addr, identity, peer, peerglide_protocol::ALPN)
+}
+fn endpoint_alpn(
+    addr: SocketAddr,
+    identity: &Identity,
+    peer: &[u8],
+    alpn: &[u8],
+) -> Result<Endpoint> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
         Arc::new(roots(peer)?),
@@ -95,14 +103,14 @@ pub fn endpoint(addr: SocketAddr, identity: &Identity, peer: &[u8]) -> Result<En
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(verifier)
         .with_single_cert(vec![identity.cert()], identity.key())?;
-    server.alpn_protocols = vec![peerglide_protocol::ALPN.to_vec()];
+    server.alpn_protocols = vec![alpn.to_vec()];
     let mut s = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server)?));
     s.transport_config(transport());
     let mut client = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_root_certificates(roots(peer)?)
         .with_client_auth_cert(vec![identity.cert()], identity.key())?;
-    client.alpn_protocols = vec![peerglide_protocol::ALPN.to_vec()];
+    client.alpn_protocols = vec![alpn.to_vec()];
     let mut c = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client)?));
     c.transport_config(transport());
     let mut e = Endpoint::server(s, addr)?;
@@ -142,6 +150,26 @@ pub async fn receive(stream: &mut quinn::RecvStream) -> Result<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn protocol_v3_peer_is_rejected_before_input_session() -> Result<()> {
+        let a = Identity::generate()?;
+        let b = Identity::generate()?;
+        let old = endpoint_alpn("127.0.0.1:0".parse()?, &a, &b.certificate, b"peerglide/3")?;
+        let current = endpoint("127.0.0.1:0".parse()?, &b, &a.certificate)?;
+        let server = async { current.accept().await.unwrap().await.is_err() };
+        let client = async {
+            old.connect(current.local_addr().unwrap(), "peerglide.local")
+                .unwrap()
+                .await
+                .is_err()
+        };
+        let (server, client) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(server, client)
+        })
+        .await?;
+        assert!(server && client, "mixed v3/v4 must not silently downgrade");
+        Ok(())
+    }
     #[tokio::test]
     async fn mutual_tls_loopback_and_motion() -> Result<()> {
         let a = Identity::generate()?;
@@ -186,7 +214,14 @@ mod tests {
                 receive(&mut rx).await?,
                 Message::Pong { lease: 7 }
             ));
-            send(&mut tx, &Message::Release { lease: 7 }).await?;
+            send(
+                &mut tx,
+                &Message::Release {
+                    lease: 7,
+                    cursor: None,
+                },
+            )
+            .await?;
             // Keep connection alive until the other future has consumed the release.
             tokio::time::sleep(Duration::from_millis(30)).await;
             Ok::<_, anyhow::Error>(())

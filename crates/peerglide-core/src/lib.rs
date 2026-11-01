@@ -2,6 +2,11 @@
 use peerglide_protocol::{Input, Motion, LEASE_MS};
 use std::collections::BTreeSet;
 
+/// Terminal reliable cursor and balanced releases; never log input payloads.
+pub struct FinishedLease {
+    pub cursor: Option<Motion>,
+    pub releases: Vec<Input>,
+}
 #[derive(Default)]
 pub struct Receiver {
     lease: Option<u64>,
@@ -76,6 +81,21 @@ impl Receiver {
     }
     pub fn active(&self) -> Option<u64> {
         self.lease
+    }
+    pub fn finish(
+        &mut self,
+        lease: u64,
+        cursor: Option<Motion>,
+        now: u64,
+    ) -> Option<FinishedLease> {
+        if self.active() != Some(lease) {
+            return None;
+        }
+        let cursor = cursor.filter(|m| m.lease == lease && self.anchor(*m, now));
+        Some(FinishedLease {
+            cursor,
+            releases: self.release(),
+        })
     }
     pub fn release(&mut self) -> Vec<Input> {
         self.lease = None;
@@ -423,5 +443,92 @@ mod expiry_boundary_tests {
         assert!(!receiver.anchor(cursor, 2500));
         assert!(receiver.expired(2500));
         assert!(!receiver.heartbeat(1, 2500));
+    }
+}
+
+#[cfg(test)]
+mod terminal_cursor_tests {
+    use super::*;
+    fn held() -> Receiver {
+        let mut r = Receiver::default();
+        assert!(r.acquire(1, 0, true));
+        assert!(r.input(
+            1,
+            Input::Button {
+                button: 1,
+                down: true
+            },
+            1
+        ));
+        r
+    }
+    #[test]
+    fn reliable_terminal_cursor_survives_total_motion_loss() {
+        let mut r = held();
+        let final_cursor = Motion {
+            lease: 1,
+            sequence: 20,
+            x: 0.0,
+            y: 0.7,
+        };
+        let end = r.finish(1, Some(final_cursor), 2).unwrap();
+        assert_eq!(end.cursor.unwrap().y, 0.7);
+        assert!(end.releases.contains(&Input::Button {
+            button: 1,
+            down: false
+        }));
+        assert!(r.active().is_none());
+        assert!(!r.motion(final_cursor, 3));
+        assert!(r.finish(1, Some(final_cursor), 3).is_none());
+    }
+    #[test]
+    fn invalid_or_expired_anchor_never_prevents_cleanup() {
+        for cursor in [
+            Motion {
+                lease: 2,
+                sequence: 1,
+                x: 0.5,
+                y: 0.5,
+            },
+            Motion {
+                lease: 1,
+                sequence: 1,
+                x: f64::NAN,
+                y: 0.5,
+            },
+            Motion {
+                lease: 1,
+                sequence: 1,
+                x: 2.0,
+                y: 0.5,
+            },
+        ] {
+            let mut r = held();
+            let end = r.finish(1, Some(cursor), 2).unwrap();
+            assert!(end.cursor.is_none());
+            assert_eq!(end.releases.len(), 1);
+        }
+        let mut r = held();
+        let end = r
+            .finish(
+                1,
+                Some(Motion {
+                    lease: 1,
+                    sequence: 1,
+                    x: 0.5,
+                    y: 0.5,
+                }),
+                1500,
+            )
+            .unwrap();
+        assert!(end.cursor.is_none());
+        assert_eq!(end.releases.len(), 1);
+    }
+    #[test]
+    fn foreign_release_cannot_end_current_control() {
+        let mut r = held();
+        assert!(r.finish(2, None, 2).is_none());
+        assert_eq!(r.active(), Some(1));
+        assert_eq!(r.finish(1, None, 3).unwrap().releases.len(), 1);
     }
 }

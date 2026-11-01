@@ -145,3 +145,16 @@ Local workspace tests/strict clippy plus native-target platform clippy passed.
 Native CI and Apple SDK constant verification are required on the final candidate.
 Real keypad, NumLock/layout/IME and mixed-keyboard behavior remain #3 acceptance;
 C02 is still implementing, with media/full OEM/capability work pending.
+
+
+## C05 terminal cursor / protocol v4
+
+Protocol v4 carries a final cursor in normal reliable Release. Tests cover total
+motion loss, invalid/foreign/expired anchors, pointer failure with balanced key
+cleanup, retained injector failures, late/duplicate leases, wire roundtrip, real
+session release and v3 ALPN rejection. Safety interruption does not require an
+anchor. Local workspace tests (39 Linux), strict clippy, Debug build and managed
+smoke passed; native matrix and physical dragging/DPI/fault acceptance remain
+separate. See ADR-0003 for the mandatory two-peer upgrade and unchanged trust.
+C02 physical-key candidate 84d06d2b05a19ccba2171881c4108700da435a1a passed all three
+platforms plus active Apple SDK constants in run 41329928375, merged via #19.

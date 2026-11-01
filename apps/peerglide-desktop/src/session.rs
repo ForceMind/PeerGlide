@@ -14,6 +14,52 @@ struct Recovery {
 impl Recovery {
     fn release(&mut self) -> Result<()> {
         self.pending_releases.extend(self.receiver.release());
+        self.flush_releases()
+    }
+    fn finish(&mut self, lease: u64, cursor: Option<Motion>, now: u64) -> Result<()> {
+        let native = self.native;
+        self.finish_with(
+            lease,
+            cursor,
+            now,
+            |m| {
+                if native {
+                    platform::pointer(m.x, m.y)
+                } else {
+                    Ok(())
+                }
+            },
+            |event| {
+                if native {
+                    platform::inject(event)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+    }
+    fn finish_with(
+        &mut self,
+        lease: u64,
+        cursor: Option<Motion>,
+        now: u64,
+        mut pointer: impl FnMut(Motion) -> Result<()>,
+        inject: impl FnMut(Input) -> Result<()>,
+    ) -> Result<()> {
+        let Some(end) = self.receiver.finish(lease, cursor, now) else {
+            return Ok(());
+        };
+        self.pending_releases.extend(end.releases);
+        let pointer_result = end.cursor.map(&mut pointer).unwrap_or(Ok(()));
+        // Pointer failure must not bypass balanced key/button cleanup.
+        self.pending_releases.flush(inject).map_err(|remaining| {
+            anyhow::anyhow!(
+                "native input cleanup failed: {remaining} releases remain pending; session stopped"
+            )
+        })?;
+        pointer_result
+    }
+    fn flush_releases(&mut self) -> Result<()> {
         let native = self.native;
         self.pending_releases.flush(|event| {
             if native { platform::inject(event) } else { Ok(()) }
@@ -103,11 +149,11 @@ pub async fn run(
                 if let Some(lease)=outgoing {
                     if now.saturating_sub(last_pong)>=1000 {
                         if let Some(cap)=&capture{cap.restore();}
-                        outgoing=None; send(&mut tx,&Message::Release{lease}).await?;
+                        outgoing=None; send(&mut tx,&Message::Release { lease, cursor: None }).await?;
                     }else{send(&mut tx,&Message::Ping{lease}).await?;}
                 }
                 // A full native event queue disables capture in the callback. Reconcile protocol immediately.
-                if let (Some(cap),Some(lease))=(&capture,outgoing){if !cap.gate.active(){outgoing=None;send(&mut tx,&Message::Release{lease}).await?;}}
+                if let (Some(cap),Some(lease))=(&capture,outgoing){if !cap.gate.active(){outgoing=None;send(&mut tx,&Message::Release { lease, cursor: None }).await?;}}
             },
             m=messages.recv()=>{
                 let Some(m)=m else{return Ok(());};
@@ -125,7 +171,7 @@ pub async fn run(
                     Message::Granted{lease}=>{
                         let activated=if pending.is_some_and(|(id,_)|id==lease) {if let Some(cap)=&capture{cap.begin(local_return.0,local_return.1)?}else{false}}else{false};
                         if activated{pending=None;outgoing=Some(lease);sequence=0;last_pong=now;if let Some(cap)=&capture{cap.gate.refresh();}}
-                        else{send(&mut tx,&Message::Release{lease}).await?;}
+                        else{send(&mut tx,&Message::Release { lease, cursor: None }).await?;}
                     },
                     Message::Denied{lease}=>{if pending.is_some_and(|(id,_)|id==lease){pending=None;}},
                     Message::Input{lease,event,cursor}=>{
@@ -133,8 +179,8 @@ pub async fn run(
                             recovery.pointer(cursor.x,cursor.y)?;recovery.input(event)?;
                         }
                     },
-                    Message::Release{lease}=>{
-                        if recovery.receiver.active()==Some(lease){recovery.release()?;}
+                    Message::Release { lease, cursor }=>{
+                        recovery.finish(lease,cursor,now)?;
                         if outgoing==Some(lease){outgoing=None;if let Some(cap)=&capture{cap.restore();}}
                     },
                     Message::Ping{lease}=>{if lease==0 || recovery.receiver.heartbeat(lease,now){send(&mut tx,&Message::Pong{lease}).await?;}},
@@ -151,14 +197,14 @@ pub async fn run(
             e=input.recv(),if native=>{
                 let Some(e)=e else{bail!("native capture channel closed");};
                 if matches!(e,Captured::Position{..}|Captured::Input(_)|Captured::Toggle) {
-                    if let Some(lease)=recovery.receiver.active(){recovery.release()?;send(&mut tx,&Message::Release{lease}).await?;}
+                    if let Some(lease)=recovery.receiver.active(){recovery.release()?;send(&mut tx,&Message::Release { lease, cursor: None }).await?;}
                 }
                 match e {
                     Captured::Emergency|Captured::UnsupportedKey=>{
                         if matches!(e,Captured::UnsupportedKey) {eprintln!("Unsupported physical key: control returned locally; this key is not forwarded.");}
                         if let Some(cap)=&capture{cap.restore();}
-                        pending=None; if let Some(lease)=outgoing.take(){send(&mut tx,&Message::Release{lease}).await?;}
-                        if let Some(lease)=recovery.receiver.active(){recovery.release()?;send(&mut tx,&Message::Release{lease}).await?;}
+                        pending=None; if let Some(lease)=outgoing.take(){send(&mut tx,&Message::Release { lease, cursor: None }).await?;}
+                        if let Some(lease)=recovery.receiver.active(){recovery.release()?;send(&mut tx,&Message::Release { lease, cursor: None }).await?;}
                     },
                     Captured::Position{x,y,width,height}=>{
                         size=(width.max(1.0),height.max(1.0));
@@ -171,25 +217,25 @@ pub async fn run(
                         }
                     },
                     Captured::Toggle=>{
-                        if let Some(lease)=outgoing.take(){if let Some(cap)=&capture{cap.restore();}send(&mut tx,&Message::Release{lease}).await?;}
-                        else if pending.is_none() && recovery.receiver.active().is_none(){next_lease+=1;position=entry_position(edge.opposite(),0.5);local_return=entry_position(edge,0.5);pending=Some((next_lease,now_ms()));send(&mut tx,&Message::Acquire{lease:next_lease,edge,along:0.5}).await?;}
+                        if let Some(lease)=outgoing.take(){if let Some(cap)=&capture{cap.restore();}send(&mut tx,&Message::Release { lease, cursor: Some(Motion {lease,sequence,x:position.0,y:position.1}) }).await?;}
+                        else if pending.is_none() && recovery.receiver.active().is_none(){next_lease=next_lease.checked_add(1).ok_or_else(||anyhow::anyhow!("lease counter exhausted"))?;position=entry_position(edge.opposite(),0.5);local_return=entry_position(edge,0.5);pending=Some((next_lease,now_ms()));send(&mut tx,&Message::Acquire{lease:next_lease,edge,along:0.5}).await?;}
                     },
                     Captured::Motion{dx,dy}=>{if let Some(lease)=outgoing {
                         position.0=(position.0+dx/size.0).clamp(0.0,1.0);position.1=(position.1+dy/size.1).clamp(0.0,1.0);
-                        sequence+=1;let m=Motion{lease,sequence,x:position.0,y:position.1};
+                        sequence=sequence.checked_add(1).ok_or_else(||anyhow::anyhow!("input sequence exhausted"))?;let m=Motion{lease,sequence,x:position.0,y:position.1};
                         if returned_to_source(edge, position.0, position.1) {
                             // Same reliable stream as earlier discrete input: motion cannot
                             // overtake those events and revoke their lease at the receiver.
                             outgoing=None;
                             if let Some(cap)=&capture{cap.restore();}
-                            send(&mut tx,&Message::Release{lease}).await?;
+                            send(&mut tx,&Message::Release { lease, cursor: Some(m) }).await?;
                         } else {
                             // Datagram queue pressure may discard motion; the next absolute position repairs it.
                             let _=c.send_datagram(encode(&m)?.into());
                         }
                     }},
                     Captured::Input(event)=>{if let Some(lease)=outgoing{
-                        sequence+=1;let cursor=Motion{lease,sequence,x:position.0,y:position.1};
+                        sequence=sequence.checked_add(1).ok_or_else(||anyhow::anyhow!("input sequence exhausted"))?;let cursor=Motion{lease,sequence,x:position.0,y:position.1};
                         send(&mut tx,&Message::Input{lease,event,cursor}).await?;
                     }},
                 }
@@ -236,6 +282,77 @@ mod tests {
             };
             assert!(returned_to_source(edge, boundary.0, boundary.1));
         }
+    }
+    fn held_recovery() -> Recovery {
+        let mut recovery = Recovery {
+            receiver: Receiver::default(),
+            native: false,
+            pending_releases: PendingReleases::default(),
+        };
+        assert!(recovery.receiver.acquire(1, 0, true));
+        assert!(recovery.receiver.input(
+            1,
+            Input::Key {
+                usage: 0xe0,
+                down: true
+            },
+            1
+        ));
+        recovery
+    }
+    #[test]
+    fn terminal_pointer_failure_still_releases_pressed_input() {
+        let mut recovery = held_recovery();
+        let mut releases = Vec::new();
+        let result = recovery.finish_with(
+            1,
+            Some(Motion {
+                lease: 1,
+                sequence: 4,
+                x: 0.0,
+                y: 0.7,
+            }),
+            2,
+            |_| anyhow::bail!("pointer rejected"),
+            |event| {
+                releases.push(event);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(recovery.receiver.active().is_none());
+        assert!(releases.contains(&Input::Key {
+            usage: 0xe0,
+            down: false
+        }));
+    }
+    #[test]
+    fn terminal_release_failure_remains_pending_for_cleanup() {
+        let mut recovery = held_recovery();
+        let mut attempts = 0;
+        assert!(recovery
+            .finish_with(
+                1,
+                None,
+                2,
+                |_| Ok(()),
+                |_| {
+                    attempts += 1;
+                    anyhow::bail!("inject rejected")
+                }
+            )
+            .is_err());
+        assert_eq!(attempts, 3);
+        let mut remaining = Vec::new();
+        assert!(recovery
+            .pending_releases
+            .flush(|event| {
+                remaining.push(event);
+                Ok::<_, ()>(())
+            })
+            .is_ok());
+        assert_eq!(remaining.len(), 1);
+        assert!(recovery.receiver.active().is_none());
     }
     async fn exercise(allow: bool) -> Result<()> {
         let a = Identity::generate()?;
@@ -356,7 +473,19 @@ mod tests {
                     Message::Pong { lease: 3 }
                 ));
                 // Source-originated release shares the discrete input stream.
-                send(&mut tx, &Message::Release { lease: 3 }).await?;
+                send(
+                    &mut tx,
+                    &Message::Release {
+                        lease: 3,
+                        cursor: Some(Motion {
+                            lease: 3,
+                            sequence: 3,
+                            x: 0.0,
+                            y: 0.7,
+                        }),
+                    },
+                )
+                .await?;
                 send(
                     &mut tx,
                     &Message::Acquire {

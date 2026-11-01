@@ -8,7 +8,7 @@ native tagged capture/injection and fail-open watchdog. `peerglide-desktop`:
 executable session orchestration, enrollment and probe.
 
 Both peers authenticate with explicitly exchanged certificates, TLS 1.3, ALPN
-`peerglide/3`. No 0-RTT input or insecure verifier. A fingerprint must be checked
+`peerglide/4`. No 0-RTT input or insecure verifier. A fingerprint must be checked
 over an independently trusted channel; the same untrusted channel is insufficient.
 
 The listener accepts one connection and the connector opens a reliable stream.
@@ -76,3 +76,8 @@ safety interruptions may discard pending remote input intentionally.
 ALPN/version v3 rejects older peers rather than mixing the old receiver-driven
 return semantics. Both computers must update together. This is a behavioral
 protocol change despite unchanged message shapes.
+
+
+Protocol v4 extends normal reliable Release with a terminal cursor snapshot.
+See [ADR-0003](ADR/0003-terminal-cursor-v4.md) for validation/cleanup order and
+mandatory two-peer upgrade. v3 source-ordered release semantics remain intact.
