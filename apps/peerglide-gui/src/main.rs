@@ -663,14 +663,17 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn dir() -> PathBuf {
+    pub(super) fn dir() -> PathBuf {
+        static NEXT_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
         std::env::temp_dir().join(format!(
-            "peerglide-ui-{}-{}",
+            "peerglide-ui-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+                .expect("system clock before Unix epoch")
+                .as_nanos(),
+            NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
     }
     #[test]
@@ -750,7 +753,7 @@ mod lifecycle_tests {
     use super::*;
     #[test]
     fn delayed_worker_output_cannot_report_a_dead_process_as_connected() -> Result<()> {
-        let dir = std::env::temp_dir().join(format!("peerglide-ui-exit-{}", std::process::id()));
+        let dir = super::tests::dir();
         {
             let mut app = App::load(dir.clone());
             let (tx, rx) = mpsc::channel();
