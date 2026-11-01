@@ -88,3 +88,26 @@ not identify the failed I/O operation or preserve allocated paths. A green final
 matrix and stress run demonstrate the new fixture behavior, not proof of the
 original failure's root cause. Issue #10 remains open pending that evidence.
 Physical Windows/macOS input acceptance #3 is unaffected.
+
+
+C01 fixture candidate `3260af9b26cea2c0696c6341ef5c4050cdf84f02` passed complete
+Windows/macOS/Linux CI run 41324690497, including the isolated macOS test and all
+20 parallel iterations; merged via #14. Historical root cause remains open #10.
+C02 first slice `bbb34d8acf85fc07e4475db8a1967114ab6de745` passed native matrix
+41324857672 and merged via #15. See INPUT_COMPATIBILITY.md for remaining C02 gaps.
+
+## C03: cooperative capture ownership
+
+CaptureSession now has explicit shutdown; source suppression is disabled before
+bounded join. A process-wide reservation survives timed-out owners until the
+native thread really exits, preventing overlapping hooks. Windows message waits
+and macOS run-loop slices bound idle shutdown checks to 50ms; cleanup unhooks or
+disables/releases the native tap before reporting completion.
+
+Local workspace tests, strict clippy, Windows/macOS target clippy including tests,
+Debug build and two-process QUIC/graceful-stop smoke passed. Lifecycle tests use
+fake loops: repeated joins, partial initialization exit, bounded timeout/recovery;
+native platforms additionally test exclusive reservations. Real native thread and
+handle counts/repeated permission-granted capture remain unverified. C03 remains
+implemented-unverified for those gates. See CAPTURE_LIFECYCLE.md. C04 structured
+worker events and C05 final-pointer/recovery regression expansion remain pending.

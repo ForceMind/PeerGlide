@@ -55,16 +55,19 @@ extern "C" {
     fn CFMachPortCreateRunLoopSource(allocator: Ref, port: Ref, order: isize) -> Ref;
     fn CFRunLoopGetCurrent() -> Ref;
     fn CFRunLoopAddSource(loop_: Ref, source: Ref, mode: Ref);
-    fn CFRunLoopRun();
+    fn CFRunLoopRunInMode(mode: Ref, seconds: f64, return_after_source: bool) -> i32;
+    static kCFRunLoopDefaultMode: Ref;
     fn CFRelease(value: Ref);
 }
 thread_local! {static STATE:RefCell<Option<HookState>>=const {RefCell::new(None)};}
 static MODIFIERS: Mutex<u64> = Mutex::new(0);
 static BUTTONS: AtomicU64 = AtomicU64::new(0);
-pub fn capture(tx: mpsc::Sender<Captured>, gate: CaptureGate) -> Result<()> {
+pub fn capture(tx: mpsc::Sender<Captured>, gate: CaptureGate) -> Result<CaptureThread> {
     ensure!(unsafe {AXIsProcessTrusted()},"grant Accessibility and Input Monitoring permissions in System Settings, then restart PeerGlide");
+    let reservation = capture_thread::Reservation::acquire()?;
     let (ready, rx) = std::sync::mpsc::sync_channel(1);
-    std::thread::spawn(move || unsafe {
+    let thread = CaptureThread::spawn(move |stop| unsafe {
+        let _reservation = reservation;
         let state = HookState {
             tx,
             gate,
@@ -91,7 +94,10 @@ pub fn capture(tx: mpsc::Sender<Captured>, gate: CaptureGate) -> Result<()> {
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
         CGEventTapEnable(tap, true);
         let _ = ready.send(true);
-        CFRunLoopRun();
+        while !stop.load(Ordering::Acquire) {
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+        }
+        CGEventTapEnable(tap, false);
         STATE.with_borrow(|s| {
             if let Some(s) = s {
                 s.gate.disable();
@@ -104,7 +110,7 @@ pub fn capture(tx: mpsc::Sender<Captured>, gate: CaptureGate) -> Result<()> {
         rx.recv_timeout(std::time::Duration::from_secs(3))?,
         "CoreGraphics event tap unavailable; check Input Monitoring permission"
     );
-    Ok(())
+    Ok(thread)
 }
 unsafe extern "C" fn callback(_: Ref, kind: u32, event: Ref, _: Ref) -> Ref {
     if kind >= 0xffff_fffe {
