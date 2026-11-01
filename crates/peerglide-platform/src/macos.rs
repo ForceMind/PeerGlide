@@ -128,16 +128,15 @@ unsafe extern "C" fn callback(_: Ref, kind: u32, event: Ref, _: Ref) -> Ref {
         match kind {
             10..=12 => {
                 let code = CGEventGetIntegerValueField(event, 9) as u16;
-                if let Some(usage) = from_code(code) {
-                    return s.key(
-                        usage,
-                        if kind == 12 {
-                            CGEventSourceKeyState(0, code)
-                        } else {
-                            kind == 10
-                        },
-                    );
-                }
+                let down = if kind == 12 {
+                    CGEventSourceKeyState(0, code)
+                } else {
+                    kind == 10
+                };
+                return match from_code(code) {
+                    Some(usage) => s.key(usage, down),
+                    None => s.unsupported_key(code, down),
+                };
             }
             5..=7 | 27 => {
                 if active {
@@ -373,9 +372,9 @@ fn modifier_flags(bits: u64) -> u64 {
     flags
 }
 unsafe fn initial_keys() -> std::collections::BTreeSet<u16> {
-    KEYS.iter()
-        .filter(|(_, c)| CGEventSourceKeyState(0, *c))
-        .map(|(u, _)| *u)
+    (0u16..128)
+        .filter(|code| CGEventSourceKeyState(0, *code))
+        .map(|code| from_code(code).unwrap_or(0x8000 | code))
         .collect()
 }
 unsafe fn initial_buttons() -> std::collections::BTreeSet<u8> {

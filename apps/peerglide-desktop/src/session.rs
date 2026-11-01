@@ -154,7 +154,8 @@ pub async fn run(
                     if let Some(lease)=recovery.receiver.active(){recovery.release()?;send(&mut tx,&Message::Release{lease}).await?;}
                 }
                 match e {
-                    Captured::Emergency=>{
+                    Captured::Emergency|Captured::UnsupportedKey=>{
+                        if matches!(e,Captured::UnsupportedKey) {eprintln!("Unsupported physical key: control returned locally; this key is not forwarded.");}
                         if let Some(cap)=&capture{cap.restore();}
                         pending=None; if let Some(lease)=outgoing.take(){send(&mut tx,&Message::Release{lease}).await?;}
                         if let Some(lease)=recovery.receiver.active(){recovery.release()?;send(&mut tx,&Message::Release{lease}).await?;}

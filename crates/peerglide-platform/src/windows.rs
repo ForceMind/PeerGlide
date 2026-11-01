@@ -58,16 +58,18 @@ unsafe extern "system" fn key_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     if code >= 0 {
         let e = &*(l as *const KBDLLHOOKSTRUCT);
         if e.flags & LLKHF_INJECTED == 0 && e.dwExtraInfo != TAG {
-            if let Some(usage) = from_vk(e.vkCode as u16) {
-                let block = STATE.with_borrow_mut(|s| {
-                    s.as_mut().is_some_and(|s| {
-                        let _callback = s.gate.begin_event();
-                        s.key(usage, w as u32 == WM_KEYDOWN || w as u32 == WM_SYSKEYDOWN)
-                    })
-                });
-                if block {
-                    return 1;
-                }
+            let block = STATE.with_borrow_mut(|s| {
+                s.as_mut().is_some_and(|s| {
+                    let _callback = s.gate.begin_event();
+                    let down = w as u32 == WM_KEYDOWN || w as u32 == WM_SYSKEYDOWN;
+                    match from_vk(e.vkCode as u16) {
+                        Some(usage) => s.key(usage, down),
+                        None => s.unsupported_key(e.vkCode as u16, down),
+                    }
+                })
+            });
+            if block {
+                return 1;
             }
         }
     }
@@ -274,8 +276,12 @@ fn from_vk(v: u16) -> Option<u16> {
 }
 
 unsafe fn initial_keys() -> std::collections::BTreeSet<u16> {
-    (4..=0xe7)
-        .filter(|&u| to_vk(u).is_some_and(|v| GetAsyncKeyState(v as i32) < 0))
+    // Exclude mouse VKs and generic modifier aliases (the side-specific VKs
+    // below own their releases). Unknown keys held at startup also block capture.
+    (7u16..=255)
+        .filter(|v| ![0x10, 0x11, 0x12].contains(v))
+        .filter(|v| GetAsyncKeyState(i32::from(*v)) < 0)
+        .map(|v| from_vk(v).unwrap_or(0x8000 | v))
         .collect()
 }
 unsafe fn initial_buttons() -> std::collections::BTreeSet<u8> {
