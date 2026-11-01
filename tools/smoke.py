@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise two real CLI processes without OS input capture or public services."""
+import json
 import pathlib
 import re
 import subprocess
@@ -29,11 +30,22 @@ with tempfile.TemporaryDirectory(prefix="peerglide-smoke-") as work:
                 time.sleep(0.05)
             else:
                 raise TimeoutError("listener did not bind")
-            probe = subprocess.run([
+            probe = subprocess.Popen([
                 str(binary), "connect", found[1], "--identity", str(b),
-                "--peer-cert", str(a / "node.crt.der"), "--bind", "127.0.0.1:0", "--probe",
-            ], check=True, capture_output=True, text=True, timeout=10)
-            assert "PASS:" in probe.stdout, probe.stdout
+                "--peer-cert", str(a / "node.crt.der"), "--bind", "127.0.0.1:0", "--probe", "--managed",
+            ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                assert probe.wait(timeout=10) == 0, probe.stderr.read()
+                stdout = probe.stdout.read()
+                states = [json.loads(line)["state"] for line in stdout.splitlines() if line.startswith("{")]
+                assert states == ["Listening", "Authenticated", "ProbePassed", "Stopped"], stdout
+            finally:
+                if probe.poll() is None:
+                    probe.kill()
+                    probe.wait()
+                probe.stdin.close()
+                probe.stdout.close()
+                probe.stderr.close()
             assert listener.wait(timeout=10) == 0, log.read_text()
             print("PASS: two executable processes, independent identities, authenticated QUIC probe, clean exit")
         finally:
@@ -46,6 +58,8 @@ with tempfile.TemporaryDirectory(prefix="peerglide-smoke-") as work:
         try:
             managed.communicate(input=b"stop\n",timeout=5)
             assert managed.returncode==0,log.read_text()
+            states = [json.loads(line)["state"] for line in log.read_text().splitlines() if line.startswith("{")]
+            assert states[-1] == "Stopped", states
             print("PASS: GUI-managed worker gracefully stops without a connected peer")
         finally:
             if managed.poll() is None:managed.kill();managed.wait()
