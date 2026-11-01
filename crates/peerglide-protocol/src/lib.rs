@@ -1,8 +1,8 @@
 //! PeerGlide's independent, versioned wire protocol. Input payloads must never be logged.
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u16 = 3;
-pub const ALPN: &[u8] = b"peerglide/3";
+pub const VERSION: u16 = 4;
+pub const ALPN: &[u8] = b"peerglide/4";
 pub const MAX_FRAME: usize = 4096;
 pub const LEASE_MS: u64 = 1500;
 
@@ -65,6 +65,7 @@ pub enum Message {
     },
     Release {
         lease: u64,
+        cursor: Option<Motion>,
     },
     Ping {
         lease: u64,
@@ -119,6 +120,28 @@ mod tests {
         }
         .valid());
         assert!(!Input::Scroll { x: i16::MIN, y: 0 }.valid());
+    }
+    #[test]
+    fn terminal_cursor_roundtrip() {
+        let release = Message::Release {
+            lease: 7,
+            cursor: Some(Motion {
+                lease: 7,
+                sequence: 99,
+                x: 0.0,
+                y: 0.7,
+            }),
+        };
+        let Message::Release {
+            lease,
+            cursor: Some(cursor),
+        } = decode::<Message>(&encode(&release).unwrap()).unwrap()
+        else {
+            panic!("missing terminal cursor");
+        };
+        assert_eq!(lease, cursor.lease);
+        assert_eq!(cursor.sequence, 99);
+        assert_eq!(cursor.y, 0.7);
     }
     #[test]
     fn roundtrip() {
